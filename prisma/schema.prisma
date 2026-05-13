@@ -1,0 +1,340 @@
+// ============================================================================
+// Hollis Identity Service — Prisma Schema
+// ============================================================================
+// Auth-only models extracted from hollis-health-app/server/prisma/schema.prisma
+//
+// Scope: user identity, sessions, MFA, password reset, OAuth account links.
+//        No clinical/PHI/billing/workout models.
+//
+// NOTE: This schema is part of the W6b/W6c bootstrap. Migrations are not yet
+// run. Prisma generate is deferred until npm install resolves fully (W6d).
+// ============================================================================
+
+generator client {
+  provider = "prisma-client"
+  output   = "./generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ============================================================================
+// Enums
+// ============================================================================
+
+// User roles - matches USER_ROLES in @hollis/contracts commonEnums
+enum UserRole {
+  ADMIN
+  CLINICIAN
+  TRAINER
+  CLIENT
+}
+
+/// MFA credential types
+enum MfaCredentialType {
+  TOTP // Time-based one-time password (Google Authenticator, Authy, etc.)
+  WEBAUTHN // Passkeys / hardware keys (YubiKey, Touch ID, etc.)
+}
+
+/// MFA event types for audit trail
+enum MfaEventType {
+  SETUP_STARTED // User initiated MFA setup
+  SETUP_COMPLETED // MFA credential verified and activated
+  SETUP_CANCELLED // User cancelled MFA setup
+  VERIFICATION_SUCCESS // MFA code verified successfully
+  VERIFICATION_FAILED // MFA code verification failed
+  BACKUP_CODE_USED // Backup code was used for recovery
+  CREDENTIAL_REMOVED // MFA credential was removed
+  RECOVERY_INITIATED // Account recovery started
+  RECOVERY_COMPLETED // Account recovery successful
+  STEP_UP_REQUIRED // Step-up auth required for sensitive action
+  STEP_UP_SUCCESS // Step-up auth completed
+  STEP_UP_FAILED // Step-up auth failed
+}
+
+enum OAuthProviderType {
+  APPLE
+  GOOGLE
+}
+
+// ============================================================================
+// Core Identity Model
+// ============================================================================
+
+model User {
+  // DEFERRED[D2]: User Barcode as Database PK
+  // User.id is HH-XXXXXX barcode (not UUID) used as PK, JWT claim, and API route param.
+
+  /// User's primary key in barcode format (HH-XXXXXX).
+  /// This value IS the barcode - there is no separate barcode field.
+  /// Used as: database PK, API route params, JWT claims, foreign keys.
+  id           String   @id
+  email        String   @unique
+  passwordHash String
+  role         UserRole @default(CLIENT)
+  isActive     Boolean  @default(true)
+
+  // ============================================================================
+  // Organization scoping — NULLABLE in Identity Service
+  // ============================================================================
+  /// Organization this user belongs to. NULLABLE here because Workouts users
+  /// may have no organization. Health sets this on registration.
+  ///
+  /// BACKWARD-COMPAT NOTE: hollis-health-app currently sets organizationId as
+  /// required. We preserve the column so Health DB migrations remain compatible.
+  /// Eventually, Health-specific org context will move to claims.hollisHealth.organizationId
+  /// once the Identity Service is live and issues tokens with per-app claim namespacing.
+  /// See: @hollis/contracts AccessTokenClaims.claims extension namespace.
+  organizationId String?
+
+  // ============================================================================
+  // Auth-related relations (only — all clinical/PHI/billing/workout relations dropped)
+  // ============================================================================
+
+  // MFA relations
+  mfaCredentials     MfaCredential[]
+  mfaEvents          MfaEvent[]
+  stepUpTokens       StepUpToken[]
+  pendingMfaSessions PendingMfaSession[]
+
+  // Auth token relations
+  passwordResetTokens PasswordResetToken[]
+  refreshTokens       RefreshToken[]
+
+  // Social sign-in OAuth account links
+  oAuthAccounts OAuthAccount[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Performance indexes for common queries
+  @@index([organizationId]) // For org-scoped queries (Health backward-compat)
+  @@index([role, isActive]) // For listing users by role
+  @@index([isActive]) // For filtering active/inactive users
+}
+
+// ============================================================================
+// Refresh Tokens — Family-rotation JWT refresh
+// ============================================================================
+
+// Refresh Tokens - For JWT token refresh
+model RefreshToken {
+  id                  String    @id @default(uuid())
+  userId              String
+  user                User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash           String    @unique
+  familyId            String
+  generation          Int       @default(0)
+  usedAt              DateTime?
+  replacedByTokenHash String?
+  deviceId            String?
+  userAgent           String?
+  expiresAt           DateTime
+  revokedAt           DateTime?
+  revokedReason       String?
+  createdAt           DateTime  @default(now())
+
+  @@index([userId])
+  @@index([familyId])
+  @@index([expiresAt])
+  @@index([userId, revokedAt])
+}
+
+// ============================================================================
+// MFA
+// ============================================================================
+
+model MfaCredential {
+  id String @id @default(uuid())
+
+  /// User this credential belongs to
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  /// Type of MFA credential
+  type MfaCredentialType
+
+  /// Human-readable name for this credential (e.g., "iPhone", "YubiKey 5")
+  name String
+
+  /// For TOTP: encrypted secret (32-byte base32 encoded)
+  /// For WEBAUTHN: not used (stored in webauthnCredentialId/publicKey)
+  totpSecret String?
+
+  /// For WEBAUTHN: the credential ID returned by the authenticator
+  // @raw-migration Partial unique index `mfa_webauthn_credentialid_unique` enforces uniqueness for non-null values.
+  webauthnCredentialId String?
+
+  /// For WEBAUTHN: the public key in COSE format (stored as base64)
+  webauthnPublicKey String?
+
+  /// For WEBAUTHN: signature counter for replay protection
+  webauthnCounter Int?
+
+  /// For WEBAUTHN: transports supported by this credential
+  webauthnTransports String[] // ["usb", "nfc", "ble", "internal"]
+
+  /// Whether this credential has been verified/confirmed
+  isVerified Boolean @default(false)
+
+  /// Whether this is the user's default MFA method
+  isDefault Boolean @default(false)
+
+  /// Last time this credential was successfully used
+  lastUsedAt DateTime?
+
+  /// Backup codes associated with this MFA setup (hashed, JSON array)
+  /// Only populated for TOTP type credentials
+  backupCodesHash String?
+
+  /// Number of backup codes remaining
+  backupCodesRemaining Int @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId, type])
+  @@index([userId, isVerified])
+}
+
+/// MFA events for audit logging
+model MfaEvent {
+  id String @id @default(uuid())
+
+  /// User who performed the action
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  /// Type of MFA event
+  eventType MfaEventType
+
+  /// Which credential was used (null for events like MFA_REQUIRED)
+  credentialId String?
+
+  /// Success or failure
+  success Boolean @default(true)
+
+  /// Error message if failed
+  errorMessage String?
+
+  /// Request metadata for security analysis
+  ipAddress String?
+  userAgent String?
+
+  /// Additional context (e.g., action that required MFA)
+  context Json?
+
+  createdAt DateTime @default(now())
+
+  @@index([userId, createdAt])
+  @@index([eventType, success])
+  @@index([createdAt])
+}
+
+/// Step-up authentication tokens for sensitive actions.
+/// Persistent store replaces in-memory Map for horizontal scaling.
+/// Tokens are single-use and short-lived (15 minutes).
+model StepUpToken {
+  id String @id @default(uuid())
+
+  /// Hash of the actual token (we don't store plaintext)
+  tokenHash String @unique
+
+  /// User this token was issued to
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  /// The action this token authorizes
+  action String
+
+  /// When this token expires
+  expiresAt DateTime
+
+  /// Whether this token has been used (single-use enforcement)
+  usedAt DateTime?
+
+  createdAt DateTime @default(now())
+
+  @@index([userId, action])
+  @@index([expiresAt])
+}
+
+/// Pending MFA session tokens for login flow.
+/// Tracks session tokens issued after password verification but before MFA completion.
+/// Tokens are single-use to prevent replay attacks.
+model PendingMfaSession {
+  id String @id @default(uuid())
+
+  /// Hash of the JWT token (we don't store plaintext)
+  tokenHash String @unique
+
+  /// The JTI (JWT ID) from the token for quick lookup
+  jti String @unique
+
+  /// User this session belongs to
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  /// When this session expires
+  expiresAt DateTime
+
+  /// Whether this session has been consumed (MFA verified)
+  consumedAt DateTime?
+
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+// ============================================================================
+// Password Reset
+// ============================================================================
+
+// Password Reset Tokens - For forgot password flow
+model PasswordResetToken {
+  id        String    @id @default(uuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+// ============================================================================
+// OAuth Account Linking
+// ============================================================================
+
+/// Links an OAuth provider identity (sub) to an existing Hollis user.
+///
+/// A user may have at most one linked account per provider.
+///
+/// SECURITY: The providerUserId (sub) is the authoritative stable identifier from the
+/// provider's verified JWT. It NEVER changes, unlike email addresses.
+model OAuthAccount {
+  id String @id @default(uuid())
+
+  /// The OAuth provider that issued this identity token.
+  provider OAuthProviderType
+
+  /// Provider-specific stable subject identifier (sub claim in the JWT).
+  /// This value is unique per user per provider and never changes.
+  providerUserId String
+
+  /// The Hollis user this OAuth identity is linked to.
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  /// A user can have at most one linked identity per provider.
+  @@unique([provider, providerUserId])
+  @@unique([userId, provider])
+  @@index([userId])
+}
