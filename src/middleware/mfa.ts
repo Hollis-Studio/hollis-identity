@@ -14,12 +14,12 @@
  *
  * deps: express, mfaService, @contracts, prisma | consumers: routes/*
  */
-import type { StepUpAuthAction } from "@hollis/contracts";
+import type { StepUpAuthAction } from "@hollis-studio/contracts";
 import {
     MFA_SESSION_WINDOW_MS,
     STEP_UP_AUTH_ACTIONS,
     STEP_UP_AUTH_WINDOW_MS,
-} from "@hollis/contracts";
+} from "@hollis-studio/contracts";
 import crypto from "crypto";
 import type { NextFunction, Request, Response } from "express";
 import { AppError } from "../lib/AppError";

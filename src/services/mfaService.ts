@@ -25,7 +25,7 @@ import type {
   StepUpAuthAction,
   StepUpAuthResponseContract,
   TotpSetupResponseContract,
-} from "@hollis/contracts";
+} from "@hollis-studio/contracts";
 import {
   CLINICAL_ROLES,
   isSiteAdminRole,
@@ -34,7 +34,7 @@ import {
   MfaCredentialTypeSchema,
   MfaEventTypeSchema,
   STEP_UP_AUTH_WINDOW_MS,
-} from "@hollis/contracts";
+} from "@hollis-studio/contracts";
 import crypto from "crypto";
 import { USER_ERRORS } from "../constants/errorMessages";
 import { decrypt, encrypt } from "../lib/encryption";

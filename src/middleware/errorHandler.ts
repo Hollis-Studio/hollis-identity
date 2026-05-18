@@ -11,7 +11,7 @@ import {
   HTTP_STATUS,
   sanitizeErrorMessage,
   sanitizeErrorObject,
-} from "@hollis/contracts";
+} from "@hollis-studio/contracts";
 import { Prisma } from "../lib/prisma";
 import type { NextFunction, Request, Response } from "express";
 import type { ParsedQs } from "qs";

@@ -16,7 +16,7 @@
 import {
   MFA_SESSION_WINDOW_MS,
   REVOKED_REASON,
-} from "@hollis/contracts";
+} from "@hollis-studio/contracts";
 import crypto from "crypto";
 import jwt from "jsonwebtoken";
 import { USER_ERRORS } from "../constants/errorMessages";
@@ -49,7 +49,7 @@ export const ACCESS_TOKEN_EXPIRY_MS = 15 * 60 * 1000;
 /**
  * JWT token purpose/type values used across auth flows.
  *
- * R7: AUTH_TOKEN_TYPE values match the shared @hollis/contracts AUTH_TOKEN_TYPES
+ * R7: AUTH_TOKEN_TYPE values match the shared @hollis-studio/contracts AUTH_TOKEN_TYPES
  * lowercase values. Local const kept to avoid a circular-import cycle with the
  * contracts bundle at this stage. TODO(W6f): migrate to contracts import.
  */

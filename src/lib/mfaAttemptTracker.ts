@@ -2,7 +2,7 @@
  * @ai-context MFA Attempt Tracker | Tracks and limits MFA verification attempts
  */
 
-import { MfaEventTypeSchema } from "@hollis/contracts";
+import { MfaEventTypeSchema } from "@hollis-studio/contracts";
 import { logger } from "./logger";
 import { prisma } from "./prisma";
 import { runAsSystemOperation } from "./tenantContext";

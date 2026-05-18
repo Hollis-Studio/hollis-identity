@@ -2,7 +2,7 @@
  * @ai-context Dev-mode error digest formatter for Identity Service.
  */
 
-import { sanitizeErrorMessage } from "@hollis/contracts";
+import { sanitizeErrorMessage } from "@hollis-studio/contracts";
 
 export interface ErrorDigestOptions {
   method?: string;

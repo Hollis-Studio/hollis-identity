@@ -21,7 +21,7 @@ import crypto from "crypto";
 import jwt from "jsonwebtoken";
 import {
   type OAuthProvider,
-} from "@hollis/contracts";
+} from "@hollis-studio/contracts";
 import { getEnv } from "../lib/env";
 import { logger } from "../lib/logger";
 import { type OAuthProviderType, prisma } from "../lib/prisma";

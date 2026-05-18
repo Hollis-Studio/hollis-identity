@@ -20,7 +20,7 @@
  *   challenge storage should be migrated from the in-memory Map placeholder below to a
  *   dedicated Prisma model (e.g. WebAuthnChallenge) to support multi-instance deployments.
  *
- * deps: express, zod, @hollis/contracts, mfaService, pendingMfaSessionService, authService
+ * deps: express, zod, @hollis-studio/contracts, mfaService, pendingMfaSessionService, authService
  * consumers: index.ts (app.use("/v1/auth/mfa", mfaRouter))
  */
 
@@ -37,7 +37,7 @@ import {
   type StepUpAuthRequestContract,
   type TotpSetupRequestContract,
   type TotpVerifyRequestContract,
-} from "@hollis/contracts";
+} from "@hollis-studio/contracts";
 import { Request, Response, Router } from "express";
 import jwt from "jsonwebtoken";
 import { z } from "zod";

@@ -8,7 +8,7 @@ Standalone authentication and identity service for the Hollis suite. Handles use
 
 ## Purpose
 
-The Identity Service is the single source of truth for user identities across the Hollis suite. Consumer apps (hollis-health-app, hollis-workouts) delegate all auth to this service and verify tokens using `@hollis/auth-client`.
+The Identity Service is the single source of truth for user identities across the Hollis suite. Consumer apps (hollis-health-app, hollis-workouts) delegate all auth to this service and verify tokens using `@hollis-studio/auth-client`.
 
 Key responsibilities:
 - Issue access tokens (JWT, short-lived) and refresh tokens (family-rotation)
@@ -22,6 +22,8 @@ Key responsibilities:
 ## Current build status
 
 **W6d complete — `npm run typecheck` is green (zero errors).**
+
+**Shared package state (2026-05-18):** this repo consumes `@hollis-studio/contracts@0.2.0-alpha.7` from GitHub Packages. The previous sibling `file:../hollis-shared` install path has been removed from manifests, Docker, and lockfiles.
 
 - W6b: Repo scaffolding
 - W6c: Verbatim copy of auth services and lib files from hollis-health-app
@@ -39,7 +41,7 @@ Key responsibilities:
 - `src/lib/accountLockout.ts`: Removed `ioredis` dependency (Identity Service uses in-memory lockout only)
 - `src/middleware/errorHandler.ts`: Removed Sentry and `SessionError` references
 - New stubs created: `lib/tenantContext.ts`, `lib/cookieConfig.ts`, `lib/AppError.ts`, `lib/metrics.ts`, `lib/formatErrorDigest.ts`, `lib/rateLimitStore.ts`, `lib/mfaAttemptTracker.ts`, `lib/encryption.ts`, `lib/buildPgPool.ts`, `constants/errorMessages.ts`, `utils/response.ts`, `types/express.d.ts`, `validation/common.ts`, `services/sessionService.ts`
-- `@hollis/auth-client` removed from `package.json` (not used — Identity Service issues tokens, doesn't verify them)
+- `@hollis-studio/auth-client` removed from `package.json` (not used — Identity Service issues tokens, doesn't verify them)
 - `@prisma/adapter-pg` + `pg` installed; Prisma client generated
 
 ---
@@ -62,14 +64,18 @@ Copy `.env.example` to `.env` and fill in values before running locally.
 
 ## Shared dependencies
 
-Uses `@hollis/contracts` from the sibling [hollis-shared](https://github.com/idlandes04/hollis-shared) monorepo via a `file:` ref. Local dev expects `hollis-shared/` checked out next to `hollis-identity/` (e.g. both under `~/Documents/SRC/`). Docker builds clone hollis-shared at the pinned `HOLLIS_SHARED_REF` build arg as part of the build.
+Uses `@hollis-studio/contracts` from GitHub Packages. Local development and container builds need npm auth for the `@hollis-studio` scope:
 
-Distribution rationale and the alternatives considered are documented in [hollis-shared/docs/2026-05-13-shared-deps-distribution.md](https://github.com/idlandes04/hollis-shared/blob/main/docs/2026-05-13-shared-deps-distribution.md).
+```ini
+@hollis-studio:registry=https://npm.pkg.github.com
+//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}
+```
+
+Container builds install directly from GitHub Packages through a BuildKit npmrc secret; they no longer clone or copy `hollis-shared`.
 
 ## Local development
 
 ```bash
-# Assumes hollis-shared is checked out at ../hollis-shared
 npm install
 npm run prisma:generate
 npm run prisma:migrate

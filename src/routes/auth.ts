@@ -9,11 +9,11 @@
  *   - MFA challenge/verify  — W6f-mfa
  *
  * deps: express, zod, jsonwebtoken, authService, cookieConfig, prisma
- * consumers: index.ts (mounted at /v1/auth), @hollis/auth-client (GET /verify)
+ * consumers: index.ts (mounted at /v1/auth), @hollis-studio/auth-client (GET /verify)
  */
 
-import { type MfaLoginPendingResponse } from "@hollis/contracts";
-import { passwordSchema } from "@hollis/contracts/password";
+import { type MfaLoginPendingResponse } from "@hollis-studio/contracts";
+import { passwordSchema } from "@hollis-studio/contracts/password";
 import { Router, type Request, type Response } from "express";
 import crypto from "crypto";
 import jwt from "jsonwebtoken";
@@ -382,7 +382,7 @@ authRouter.post("/refresh", async (req: Request, res: Response) => {
 
 authRouter.get("/verify", async (req: Request, res: Response) => {
   // auth-public: verifies a Bearer token and returns AccessTokenClaims as JSON.
-  // Used by @hollis/auth-client's remote verify path when offline JWT verification
+  // Used by @hollis-studio/auth-client's remote verify path when offline JWT verification
   // is not suitable (e.g., first request before JWKS is cached).
   const authHeader = req.headers.authorization;
 
@@ -695,7 +695,7 @@ authRouter.post("/biometric-token", authenticateToken, async (req: Request, res:
 // ============================================================================
 
 // TODO(W6h): migrate to RS256 + publish JWK. HS256 has no public key to publish.
-// Consumers using @hollis/auth-client currently use the remote /verify endpoint.
+// Consumers using @hollis-studio/auth-client currently use the remote /verify endpoint.
 export function jwksHandler(_req: Request, res: Response): void {
   res.json({ keys: [] });
 }

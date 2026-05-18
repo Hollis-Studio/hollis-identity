@@ -30,7 +30,7 @@
  * deps: bcryptjs, crypto, @contracts | consumers: authService, passwordResetService, adminUserService
  */
 
-import { PASSWORD_POLICY } from "@hollis/contracts";
+import { PASSWORD_POLICY } from "@hollis-studio/contracts";
 import bcrypt from "bcryptjs";
 import crypto from "crypto";
 import { env } from "./env";
@@ -461,7 +461,7 @@ export function getHashInfo(storedHash: string): {
 
 /**
  * Validate password meets security requirements.
- * Uses centralized PASSWORD_POLICY from @hollis/contracts.
+ * Uses centralized PASSWORD_POLICY from @hollis-studio/contracts.
  *
  * @param password - Plain text password to validate
  * @returns Object with valid flag and any errors

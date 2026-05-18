@@ -2,7 +2,7 @@
  * @ai-context Standard application error class for consistent API error responses
  */
 
-import { sanitizeErrorMessage, sanitizeErrorObject } from '@hollis/contracts';
+import { sanitizeErrorMessage, sanitizeErrorObject } from '@hollis-studio/contracts';
 
 export const ERROR_CODES = {
   VALIDATION_ERROR: 'VALIDATION_ERROR',

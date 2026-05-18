@@ -14,7 +14,7 @@
  * deps: prisma, crypto, bcryptjs | consumers: routes/auth.ts
  */
 
-import { REVOKED_REASON } from "@hollis/contracts";
+import { REVOKED_REASON } from "@hollis-studio/contracts";
 import crypto from "crypto";
 import { USER_ERRORS } from "../constants/errorMessages";
 import { clearAccountLockout } from "../lib/accountLockout";

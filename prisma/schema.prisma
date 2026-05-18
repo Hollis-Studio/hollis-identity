@@ -23,7 +23,7 @@ datasource db {
 // Enums
 // ============================================================================
 
-// User roles - matches USER_ROLES in @hollis/contracts commonEnums
+// User roles - matches USER_ROLES in @hollis-studio/contracts commonEnums
 enum UserRole {
   ADMIN
   CLINICIAN
@@ -85,7 +85,7 @@ model User {
   /// required. We preserve the column so Health DB migrations remain compatible.
   /// Eventually, Health-specific org context will move to claims.hollisHealth.organizationId
   /// once the Identity Service is live and issues tokens with per-app claim namespacing.
-  /// See: @hollis/contracts AccessTokenClaims.claims extension namespace.
+  /// See: @hollis-studio/contracts AccessTokenClaims.claims extension namespace.
   organizationId String?
 
   // ============================================================================
