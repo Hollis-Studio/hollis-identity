@@ -1,18 +1,18 @@
 /**
- * @ai-context JWT auth middleware | verifies cookies or Authorization header and attaches user to request
+ * @ai-context JWT auth middleware | verifies Authorization Bearer tokens and attaches user to request
  *
  * SECURITY: Tokens contain minimal claims (userId, role, jti) — no email/PHI.
  * organizationId is optional — Workouts users have no org.
  *
- * Authentication priority:
- * 1. httpOnly cookie (web-admin) — preferred for web
- * 2. Authorization Bearer header (mobile apps) — fallback
+ * Identity Service is cookie-agnostic. Consumer apps own cookie posture and pass
+ * Bearer tokens to Identity when calling authenticated Identity routes.
  */
+import { AUDIENCES } from "@hollis-studio/contracts";
 import { NextFunction, Request, Response } from "express";
-import jwt, { type JwtPayload, type VerifyErrors } from "jsonwebtoken";
+import { type JwtPayload } from "jsonwebtoken";
 import { USER_ERRORS } from "../constants/errorMessages";
-import { AUTH_COOKIES } from "../lib/cookieConfig";
 import { env } from "../lib/env";
+import { verifyJwt } from "../lib/jwtKeys";
 import { logger } from "../lib/logger";
 import { metrics } from "../lib/metrics";
 import { prisma } from "../lib/prisma";
@@ -23,7 +23,12 @@ import { sendForbidden, sendUnauthorized } from "../utils/response";
 // Import the type augmentation
 import "../types/express.d.ts";
 
-const getJwtSecret = () => env.JWT_SECRET;
+function getAcceptedAudiences(): [string, ...string[]] {
+  const configured = env.JWT_AUDIENCES?.split(",").map((s) => s.trim()).filter(Boolean) ?? [];
+  return configured.length > 0
+    ? configured as [string, ...string[]]
+    : [...AUDIENCES] as [string, ...string[]];
+}
 
 /**
  * @deprecated Use Express.Request directly — user property is now globally augmented
@@ -31,9 +36,6 @@ const getJwtSecret = () => env.JWT_SECRET;
 export type AuthRequest = Request;
 
 function extractToken(req: Request): string | null {
-  const cookieToken = req.cookies[AUTH_COOKIES.ACCESS_TOKEN];
-  if (cookieToken) return cookieToken;
-
   const authHeader = req.headers.authorization;
   if (authHeader?.startsWith("Bearer ")) {
     return authHeader.substring(7);
@@ -54,28 +56,36 @@ export const authenticateToken = (
     return;
   }
 
-  jwt.verify(
-    token,
-    getJwtSecret(),
-    async (
-      err: VerifyErrors | null,
-      decoded: JwtPayload | string | undefined,
-    ) => {
-      if (err || !decoded || typeof decoded === "string") {
+  void (async () => {
+    try {
+      const decoded = verifyJwt<JwtPayload | string>(token, { audience: getAcceptedAudiences() });
+      if (!decoded || typeof decoded === "string") {
         sendUnauthorized(res, "Invalid or expired token");
         return;
       }
 
       const userPayload = decoded as JwtPayload & {
         userId: string;
-        role: string;
+        role?: string;
         type?: string;
-        organizationId?: string;
+        organizationId?: string | null;
+        claims?: {
+          hollisHealth?: {
+            role?: string;
+            organizationId?: string | null;
+          };
+        };
         jti?: string;
         iat?: number;
         mfaVerifiedAt?: number;
         mfaEnabled?: boolean;
       };
+
+      const role = userPayload.role ?? userPayload.claims?.hollisHealth?.role;
+      if (!role) {
+        sendUnauthorized(res, "Invalid token claims");
+        return;
+      }
 
       if (userPayload.type !== AUTH_TOKEN_TYPE.ACCESS) {
         logger.warn(
@@ -112,15 +122,18 @@ export const authenticateToken = (
 
       req.user = {
         userId: userPayload.userId,
-        role: userPayload.role,
-        organizationId: userPayload.organizationId,
+        role,
+        organizationId:
+          userPayload.organizationId ?? userPayload.claims?.hollisHealth?.organizationId ?? undefined,
         jti: userPayload.jti,
         mfaVerifiedAt: userPayload.mfaVerifiedAt,
         mfaEnabled: userPayload.mfaEnabled,
       };
       next();
-    },
-  );
+    } catch {
+      sendUnauthorized(res, "Invalid or expired token");
+    }
+  })();
 };
 
 /**

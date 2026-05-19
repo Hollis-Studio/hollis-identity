@@ -19,9 +19,8 @@
  *
  * ## Storage Backend
  *
- * Uses the same Redis/memory abstraction as rate limiting:
- * - Single instance: In-memory store (default)
- * - Horizontal scaling: Redis store with fallback
+ * Uses PostgreSQL in production so all ECS tasks share the same lockout state.
+ * Local development and tests use in-memory storage.
  *
  * ## Device/IP Reputation Signals
  *
@@ -32,14 +31,13 @@
  * @see {@link ./rateLimitStore.ts} for store abstraction
  * @see {@link docs/SECURITY_ASSUMPTIONS.md} for security decisions
  *
- * deps: crypto, ioredis, logger | consumers: routes/auth.ts, services/authService.ts
+ * deps: crypto, prisma, logger | consumers: routes/auth.ts, services/authService.ts
  */
 
-// R6: ioredis removed — Identity Service uses in-memory lockout only.
-// Redis-backed lockout is Health-specific infrastructure.
 import crypto from "crypto";
 import { env } from "./env";
 import { logger } from "./logger";
+import { prisma } from "./prisma";
 
 // ============================================================================
 // Types
@@ -345,24 +343,128 @@ export class MemoryAccountLockoutStore implements IAccountLockoutStore {
 }
 
 // ============================================================================
-// Redis Store Implementation — REMOVED in W6d
+// Database Store Implementation
 // ============================================================================
-// RedisAccountLockoutStore was removed because ioredis is not a dependency of
-// Identity Service. In-memory lockout is sufficient for the current deployment.
-// TODO(W6h): Add Redis-backed store when multi-instance deployments are required.
-//
-// To satisfy TypeScript, we provide a dead-code placeholder that will never be
-// instantiated (getAccountLockoutStore() always returns MemoryAccountLockoutStore).
-class RedisAccountLockoutStore implements IAccountLockoutStore {
-  // Stub — never instantiated. Delegates to memory store.
-  private memory = new MemoryAccountLockoutStore();
 
-  async getStatus(k: string, c: LockoutConfig) { return this.memory.getStatus(k, c); }
-  async recordFailure(k: string, ip: string, c: LockoutConfig) { return this.memory.recordFailure(k, ip, c); }
-  async recordSuccess(k: string) { return this.memory.recordSuccess(k); }
-  async clearLockout(k: string) { return this.memory.clearLockout(k); }
-  async resetAll() { return this.memory.resetAll(); }
-  async close() { return this.memory.close(); }
+/**
+ * PostgreSQL-backed lockout store for horizontally scaled production tasks.
+ */
+export class DatabaseAccountLockoutStore implements IAccountLockoutStore {
+  async getStatus(
+    accountKey: string,
+    config: LockoutConfig,
+  ): Promise<LockoutStatus> {
+    const now = Date.now();
+    const entry = await prisma.accountLockoutEntry.findUnique({
+      where: { accountKey },
+    });
+
+    if (!entry) {
+      return {
+        isLocked: false,
+        failedAttempts: 0,
+        lockoutEndsAt: 0,
+        retryAfterSeconds: 0,
+        uniqueIpCount: 0,
+      };
+    }
+
+    const windowStart = now - config.failureWindowSeconds * 1000;
+    const activeFailures = entry.failedAttempts.filter((ts) => ts.getTime() > windowStart);
+    const lockoutEndsAt = entry.lockoutEndsAt?.getTime() ?? 0;
+    const isLocked = lockoutEndsAt > now;
+
+    if (activeFailures.length !== entry.failedAttempts.length) {
+      await prisma.accountLockoutEntry.update({
+        where: { accountKey },
+        data: { failedAttempts: activeFailures },
+      });
+    }
+
+    return {
+      isLocked,
+      failedAttempts: activeFailures.length,
+      lockoutEndsAt,
+      retryAfterSeconds: isLocked ? Math.ceil((lockoutEndsAt - now) / 1000) : 0,
+      uniqueIpCount: entry.uniqueIpHashes.length,
+    };
+  }
+
+  async recordFailure(
+    accountKey: string,
+    ipAddress: string,
+    config: LockoutConfig,
+  ): Promise<LockoutStatus> {
+    const now = new Date();
+    const nowMs = now.getTime();
+    const ipHash = hashIpAddress(ipAddress);
+    const windowStart = nowMs - config.failureWindowSeconds * 1000;
+
+    const status = await prisma.$transaction(async (tx) => {
+      const existing = await tx.accountLockoutEntry.findUnique({
+        where: { accountKey },
+      });
+
+      const failedAttempts = [
+        ...(existing?.failedAttempts ?? []).filter((ts) => ts.getTime() > windowStart),
+        now,
+      ];
+      const uniqueIpHashes = Array.from(new Set([...(existing?.uniqueIpHashes ?? []), ipHash]));
+      const lockoutDuration = calculateLockoutDuration(failedAttempts.length, config);
+      const lockoutEndsAt = lockoutDuration > 0
+        ? new Date(nowMs + lockoutDuration * 1000)
+        : existing?.lockoutEndsAt ?? null;
+
+      await tx.accountLockoutEntry.upsert({
+        where: { accountKey },
+        update: { failedAttempts, uniqueIpHashes, lockoutEndsAt },
+        create: { accountKey, failedAttempts, uniqueIpHashes, lockoutEndsAt },
+      });
+
+      const isLocked = (lockoutEndsAt?.getTime() ?? 0) > nowMs;
+      return {
+        isLocked,
+        failedAttempts: failedAttempts.length,
+        lockoutEndsAt: lockoutEndsAt?.getTime() ?? 0,
+        retryAfterSeconds: isLocked
+          ? Math.ceil(((lockoutEndsAt?.getTime() ?? nowMs) - nowMs) / 1000)
+          : 0,
+        uniqueIpCount: uniqueIpHashes.length,
+      };
+    });
+
+    if (status.uniqueIpCount >= config.maxUniqueIpsBeforeFlag) {
+      logger.warn(
+        {
+          accountKeyPrefix: accountKey.substring(0, 8),
+          uniqueIpCount: status.uniqueIpCount,
+          failedAttempts: status.failedAttempts,
+        },
+        "Potential distributed attack: many IPs targeting single account",
+      );
+    }
+
+    return status;
+  }
+
+  async recordSuccess(accountKey: string): Promise<void> {
+    await prisma.accountLockoutEntry.update({
+      where: { accountKey },
+      data: { failedAttempts: [], lockoutEndsAt: null },
+    }).catch(() => undefined);
+  }
+
+  async clearLockout(accountKey: string): Promise<void> {
+    await prisma.accountLockoutEntry.delete({ where: { accountKey } }).catch(() => undefined);
+  }
+
+  async resetAll(): Promise<void> {
+    await prisma.accountLockoutEntry.deleteMany();
+  }
+
+  async close(): Promise<void> {
+    // Prisma lifecycle is owned by prisma.ts.
+  }
 }
 
 // ============================================================================
@@ -380,9 +482,9 @@ export function getAccountLockoutStore(): IAccountLockoutStore {
     return lockoutStore;
   }
 
-  // RATE_LIMIT_STORE schema only permits 'memory'; Redis path is reserved for
-  // future multi-instance support when the schema is extended.
-  lockoutStore = new MemoryAccountLockoutStore();
+  lockoutStore = env.NODE_ENV === "production"
+    ? new DatabaseAccountLockoutStore()
+    : new MemoryAccountLockoutStore();
 
   return lockoutStore;
 }

@@ -7,3 +7,4 @@ coverage/
 .tsbuildinfo
 *.log
 prisma/generated/
+infrastructure/.terraform/

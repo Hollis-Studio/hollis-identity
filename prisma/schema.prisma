@@ -6,8 +6,9 @@
 // Scope: user identity, sessions, MFA, password reset, OAuth account links.
 //        No clinical/PHI/billing/workout models.
 //
-// NOTE: This schema is part of the W6b/W6c bootstrap. Migrations are not yet
-// run. Prisma generate is deferred until npm install resolves fully (W6d).
+// NOTE: This schema is deployable locally and Prisma client generation is wired.
+// Production cutover still needs a reviewed initial migration committed and run
+// with prisma migrate deploy against the target Identity database.
 // ============================================================================
 
 generator client {
@@ -63,12 +64,9 @@ enum OAuthProviderType {
 // ============================================================================
 
 model User {
-  // DEFERRED[D2]: User Barcode as Database PK
-  // User.id is HH-XXXXXX barcode (not UUID) used as PK, JWT claim, and API route param.
-
-  /// User's primary key in barcode format (HH-XXXXXX).
-  /// This value IS the barcode - there is no separate barcode field.
-  /// Used as: database PK, API route params, JWT claims, foreign keys.
+  /// Opaque Identity user id used as database PK, API route param, JWT subject,
+  /// and foreign key. Existing Health users may retain HH barcode ids, while new
+  /// Identity-created users may be UUIDs. Do not rely on the id format.
   id           String   @id
   email        String   @unique
   passwordHash String
@@ -286,6 +284,47 @@ model PendingMfaSession {
 
   @@index([userId])
   @@index([expiresAt])
+}
+
+/// Access-token denylist entries for immediate revocation across ECS tasks.
+/// Access tokens remain stateless JWTs, but revocation decisions are persisted
+/// so rolling deploys and horizontal scaling do not lose security events.
+model AccessTokenDenylistEntry {
+  id        String   @id @default(uuid())
+  jti       String   @unique
+  reason    String
+  expiresAt DateTime
+  revokedAt DateTime @default(now())
+
+  @@index([expiresAt])
+}
+
+/// User-level access-token denylist watermark. Tokens issued at or before
+/// deniedBefore are rejected for this user until all affected access tokens
+/// have naturally expired.
+model UserTokenDenylistEntry {
+  id           String   @id @default(uuid())
+  userId       String   @unique
+  deniedBefore DateTime
+  reason       String
+  expiresAt    DateTime
+  revokedAt    DateTime @default(now())
+
+  @@index([expiresAt])
+}
+
+/// Account lockout state shared across ECS tasks.
+/// Emails and IPs are hashed before storage.
+model AccountLockoutEntry {
+  accountKey     String   @id
+  failedAttempts DateTime[]
+  lockoutEndsAt  DateTime?
+  uniqueIpHashes String[]
+  lastUpdated    DateTime @updatedAt
+  createdAt      DateTime @default(now())
+
+  @@index([lockoutEndsAt])
+  @@index([lastUpdated])
 }
 
 // ============================================================================

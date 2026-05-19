@@ -1,5 +1,10 @@
 import { Pool, type PoolConfig } from "pg";
 
+function buildProductionSslConfig(): PoolConfig["ssl"] {
+  const ca = process.env.DATABASE_SSL_CA?.replace(/\\n/g, "\n");
+  return ca ? { ca, rejectUnauthorized: true } : { rejectUnauthorized: true };
+}
+
 export function buildPgPool(params: {
   databaseUrl: string;
   nodeEnv: string;
@@ -20,7 +25,7 @@ export function buildPgPool(params: {
 
   return new Pool({
     connectionString,
-    ...(isProduction ? { ssl: { rejectUnauthorized: false } } : {}),
+    ...(isProduction ? { ssl: buildProductionSslConfig() } : {}),
     ...params.poolOptions,
   });
 }

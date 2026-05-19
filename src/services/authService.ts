@@ -14,13 +14,15 @@
  * deps: prisma, passwordHashing, jsonwebtoken, crypto | consumers: routes/auth.ts
  */
 import {
+  AUDIENCES,
   MFA_SESSION_WINDOW_MS,
   REVOKED_REASON,
+  type Audience,
 } from "@hollis-studio/contracts";
 import crypto from "crypto";
-import jwt from "jsonwebtoken";
 import { USER_ERRORS } from "../constants/errorMessages";
-import { getEnv, isEnvValidated } from "../lib/env";
+import { getEnv } from "../lib/env";
+import { signJwt, verifyJwt } from "../lib/jwtKeys";
 import { logger } from "../lib/logger";
 import { rehashIfNeeded, verifyPassword } from "../lib/passwordHashing";
 import { timingSafePasswordVerify } from "../lib/securityUtils";
@@ -30,16 +32,6 @@ import { runAsSystemOperation } from "../lib/tenantContext";
 // ============================================================================
 // Config
 // ============================================================================
-
-function getJwtSecret(): string {
-  if (!isEnvValidated()) {
-    throw new Error(
-      "FATAL: JWT_SECRET accessed before environment validation.\n" +
-        "Ensure validateEnvOnStartup() is called early in index.ts.",
-    );
-  }
-  return getEnv().JWT_SECRET;
-}
 
 export const ACCESS_TOKEN_EXPIRY = "15m";
 export const REFRESH_TOKEN_EXPIRY = "7d";
@@ -59,6 +51,17 @@ export const AUTH_TOKEN_TYPE = {
   MFA_PENDING: "mfa_pending",
 } as const;
 export type AuthTokenType = (typeof AUTH_TOKEN_TYPE)[keyof typeof AUTH_TOKEN_TYPE];
+
+function getTokenAudiences(): [Audience, ...Audience[]] {
+  const configured = getEnv().JWT_AUDIENCES?.split(",").map((s) => s.trim()).filter(Boolean) ?? [];
+  const validAudiences = configured.filter((audience): audience is Audience =>
+    AUDIENCES.includes(audience as Audience),
+  );
+
+  return validAudiences.length > 0
+    ? validAudiences as [Audience, ...Audience[]]
+    : [...AUDIENCES] as [Audience, ...Audience[]];
+}
 
 // ============================================================================
 // Types
@@ -133,27 +136,25 @@ export function generateAccessTokenWithJti(
   options?: AccessTokenOptions,
 ): { token: string; jti: string } {
   const { mfaVerifiedAt, mfaEnabled, tokenType = AUTH_TOKEN_TYPE.ACCESS } = options ?? {};
-  const jwtSecret = getJwtSecret();
   const accessJti = crypto.randomUUID();
 
   const payload: Record<string, unknown> = {
     sub: userId,
     userId,
     role,
+    organizationId,
     type: tokenType,
     jti: accessJti,
+    aud: getTokenAudiences(),
+    claims: {
+      hollisHealth: {
+        role,
+        organizationId,
+      },
+    },
   };
 
-  // Include organizationId when present (optional — Workouts users have no org)
-  if (organizationId != null) {
-    payload.organizationId = organizationId;
-  }
-
-  // Include aud claim from JWT_AUDIENCES env var
   const env = getEnv();
-  if (env.JWT_AUDIENCES) {
-    payload.aud = env.JWT_AUDIENCES.split(",").map((s) => s.trim()).filter(Boolean);
-  }
   if (env.JWT_ISSUER) {
     payload.iss = env.JWT_ISSUER;
   }
@@ -166,7 +167,7 @@ export function generateAccessTokenWithJti(
     payload.mfaEnabled = mfaEnabled;
   }
 
-  const token = jwt.sign(payload, jwtSecret, {
+  const token = signJwt(payload, {
     expiresIn: ACCESS_TOKEN_EXPIRY,
   });
   return { token, jti: accessJti };
@@ -181,22 +182,23 @@ export async function issueRefreshToken(
   organizationId: string | null,
   collisionContext: string,
 ): Promise<string> {
-  const jwtSecret = getJwtSecret();
   const refreshJti = crypto.randomUUID();
 
   const payload: Record<string, unknown> = {
     sub: userId,
     userId,
     role,
+    organizationId,
     type: AUTH_TOKEN_TYPE.REFRESH,
     jti: refreshJti,
+    aud: getTokenAudiences(),
   };
-
-  if (organizationId != null) {
-    payload.organizationId = organizationId;
+  const env = getEnv();
+  if (env.JWT_ISSUER) {
+    payload.iss = env.JWT_ISSUER;
   }
 
-  const refreshToken = jwt.sign(payload, jwtSecret, { expiresIn: REFRESH_TOKEN_EXPIRY });
+  const refreshToken = signJwt(payload, { expiresIn: REFRESH_TOKEN_EXPIRY });
 
   const tokenHash = crypto.createHash("sha256").update(refreshToken).digest("hex");
   const familyId = crypto.randomUUID();
@@ -450,14 +452,13 @@ export async function refresh(
 ): Promise<AuthResponse> {
   return runAsSystemOperation(
     async () => {
-      const jwtSecret = getJwtSecret();
       try {
-        const decoded = jwt.verify(refreshToken, jwtSecret) as {
+        const decoded = verifyJwt<{
           userId: string;
           role: string;
           type?: string;
           jti?: string;
-        };
+        }>(refreshToken, { audience: getTokenAudiences() });
 
         if (decoded.type !== AUTH_TOKEN_TYPE.REFRESH) {
           logger.warn(
@@ -573,13 +574,16 @@ export async function refresh(
           sub: decoded.userId,
           userId: decoded.userId,
           role: decoded.role,
+          organizationId: user.organizationId,
           type: AUTH_TOKEN_TYPE.REFRESH,
           jti: newRefreshJti,
+          aud: getTokenAudiences(),
         };
-        if (user.organizationId != null) {
-          newRefreshPayload.organizationId = user.organizationId;
+        const env = getEnv();
+        if (env.JWT_ISSUER) {
+          newRefreshPayload.iss = env.JWT_ISSUER;
         }
-        const newRefreshToken = jwt.sign(newRefreshPayload, jwtSecret, {
+        const newRefreshToken = signJwt(newRefreshPayload, {
           expiresIn: REFRESH_TOKEN_EXPIRY,
         });
 

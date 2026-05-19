@@ -10,7 +10,7 @@
  *   DELETE /credentials/:credentialId - Remove a credential
  *   POST /totp/setup            - Initiate TOTP enrollment
  *   POST /totp/verify           - Confirm TOTP enrollment
- *   POST /login/verify          - Verify MFA code from mfa_pending session; issue full session
+ *   POST /login/verify          - Verify MFA code from mfa_pending session; return full session tokens
  *   POST /session-reverify      - Re-verify MFA when 8h session window expires
  *   POST /step-up               - Step-up auth for sensitive actions
  *   POST /backup-codes          - Regenerate backup codes (requires current TOTP code)
@@ -25,6 +25,7 @@
  */
 
 import {
+  AUDIENCES,
   backupCodesRequestSchema,
   mfaLoginVerifyRequestSchema,
   mfaSessionReverifyRequestSchema,
@@ -39,10 +40,8 @@ import {
   type TotpVerifyRequestContract,
 } from "@hollis-studio/contracts";
 import { Request, Response, Router } from "express";
-import jwt from "jsonwebtoken";
 import { z } from "zod";
-import { setAuthCookies } from "../lib/cookieConfig.js";
-import { env } from "../lib/env.js";
+import { verifyJwt } from "../lib/jwtKeys.js";
 import { logger } from "../lib/logger.js";
 import { prisma } from "../lib/prisma.js";
 import { runAsSystemOperation } from "../lib/tenantContext.js";
@@ -93,10 +92,7 @@ function parseBody<T>(
   const result = schema.safeParse(body);
   if (!result.success) {
     const issues = result.error.issues;
-    sendBadRequest(
-      res,
-      issues[0]?.message ?? "Invalid request body",
-    );
+    sendBadRequest(res, issues[0]?.message ?? "Invalid request body");
     return null;
   }
   return result.data;
@@ -340,63 +336,45 @@ mfaRouter.post(
  * POST /v1/auth/mfa/login/verify
  * auth-public: accepts a single-use mfa_pending session token (issued by /login when MFA is
  * enabled). Verifies the TOTP/backup code, consumes the pending session, and issues a full
- * authenticated session pair (access + refresh tokens + httpOnly cookies).
+ * authenticated session pair (access + refresh tokens).
  */
-mfaRouter.post(
-  "/login/verify",
-  async (req: Request, res: Response) => {
+mfaRouter.post("/login/verify", async (req: Request, res: Response) => {
+  try {
+    const body = parseBody(mfaLoginVerifyRequestSchema, req.body, res);
+    if (!body) return;
+
+    const { code, credentialId, isBackupCode, sessionToken } =
+      body as MfaLoginVerifyRequestContract;
+
+    // --- Validate and decode the mfa_pending session token ---
+    let userIdToVerify: string;
+    let userRole: string;
+    let userOrgId: string | null;
+    let jti: string;
+
     try {
-      const body = parseBody(mfaLoginVerifyRequestSchema, req.body, res);
-      if (!body) return;
+      const decoded = verifyJwt<{
+        userId?: string;
+        role?: string;
+        organizationId?: string | null;
+        jti?: string;
+        type?: string;
+      }>(sessionToken, { audience: [...AUDIENCES] });
 
-      const { code, credentialId, isBackupCode, sessionToken } =
-        body as MfaLoginVerifyRequestContract;
-
-      // --- Validate and decode the mfa_pending session token ---
-      let userIdToVerify: string;
-      let userRole: string;
-      let userOrgId: string | null;
-      let jti: string;
-
-      try {
-        const decoded = jwt.verify(sessionToken, env.JWT_SECRET) as {
-          userId?: string;
-          role?: string;
-          organizationId?: string | null;
-          jti?: string;
-          type?: string;
-        };
-
-        if (
-          decoded.type !== AUTH_TOKEN_TYPE.MFA_PENDING ||
-          !decoded.userId ||
-          !decoded.role ||
-          !decoded.jti
-        ) {
-          logger.warn(
-            {
-              userId: decoded.userId,
-              jti: decoded.jti,
-              tokenType: decoded.type,
-            },
-            "[SECURITY] Invalid token payload for MFA login verification",
-          );
-          return sendError(
-            res,
-            "Invalid or expired session token",
-            401,
-            undefined,
-            "INVALID_SESSION_TOKEN",
-          );
-        }
-
-        userIdToVerify = decoded.userId;
-        userRole = decoded.role;
-        userOrgId = decoded.organizationId ?? null;
-        jti = decoded.jti;
-      } catch (err) {
-        // phi-safe:token — error object only, no actual token value logged
-        logger.warn({ err }, "[MFA] Invalid session token");
+      if (
+        decoded.type !== AUTH_TOKEN_TYPE.MFA_PENDING ||
+        !decoded.userId ||
+        !decoded.role ||
+        !decoded.jti
+      ) {
+        logger.warn(
+          {
+            userId: decoded.userId,
+            jti: decoded.jti,
+            tokenType: decoded.type,
+          },
+          "[SECURITY] Invalid token payload for MFA login verification",
+        );
         return sendError(
           res,
           "Invalid or expired session token",
@@ -406,128 +384,136 @@ mfaRouter.post(
         );
       }
 
-      // --- Consume the pending MFA session (single-use enforcement) ---
-      const sessionResult = await consumePendingMfaSession(
-        jti,
-        sessionToken,
-        userIdToVerify,
-      );
-
-      if (!sessionResult.valid) {
-        logger.warn(
-          { userId: userIdToVerify, jti, reason: sessionResult.reason },
-          "[SECURITY] Pending MFA session validation failed",
-        );
-        return sendError(
-          res,
-          sessionResult.reason === "Session already used"
-            ? "Session token has already been used. Please login again."
-            : "Invalid or expired session token",
-          401,
-          undefined,
-          "INVALID_SESSION_TOKEN",
-        );
-      }
-
-      // --- Verify the MFA code ---
-      const result = await mfaService.verifyMfaLogin(
-        userIdToVerify,
-        code,
-        credentialId,
-        isBackupCode,
-        getRequestMeta(req),
-      );
-
-      if (!result.success) {
-        return sendBadRequest(res, "MFA verification failed");
-      }
-
-      // --- Generate full session tokens with mfaVerifiedAt ---
-      const tokenResponse = await generateMfaVerifiedToken(
-        userIdToVerify,
-        userRole,
-        userOrgId,
-      );
-
-      // --- Fetch user profile for response ---
-      const user = await runAsSystemOperation(
-        async () =>
-          prisma.user.findUnique({
-            where: { id: userIdToVerify },
-            select: { id: true, email: true, role: true },
-          }),
-        { reason: "auth:mfa-verify" },
-      );
-
-      if (!user) {
-        // phi-safe:userId — surrogate key, not PHI
-        logger.error(
-          { userId: userIdToVerify },
-          "[MFA] User not found after MFA verification",
-        );
-        return sendNotFound(res, "User");
-      }
-
-      // CRITICAL: Set httpOnly cookies so web-admin requests after MFA succeed.
-      const isProduction = env.NODE_ENV === "production";
-      setAuthCookies(
-        res,
-        tokenResponse.idToken,
-        tokenResponse.refreshToken,
-        isProduction,
-      );
-
-      return sendSuccess(res, {
-        expiresIn: tokenResponse.expiresIn,
-        expiresAt: tokenResponse.expiresAt,
-        user: {
-          uid: user.id,
-          email: user.email,
-          role: user.role,
-        },
-      });
+      userIdToVerify = decoded.userId;
+      userRole = decoded.role;
+      userOrgId = decoded.organizationId ?? null;
+      jti = decoded.jti;
     } catch (err) {
-      if (err instanceof Error && "code" in err) {
-        const mfaErr = err as {
-          code?: string;
-          attemptsRemaining?: number;
-          retryAfterSeconds?: number;
-        };
-        const code = mfaErr.code;
-
-        if (
-          code === "INVALID_CODE" ||
-          code === "INVALID_BACKUP_CODE" ||
-          code === "MFA_LOCKED"
-        ) {
-          let details: string | undefined;
-          if (
-            typeof mfaErr.attemptsRemaining === "number" ||
-            typeof mfaErr.retryAfterSeconds === "number"
-          ) {
-            const parts: string[] = [];
-            if (typeof mfaErr.attemptsRemaining === "number") {
-              parts.push(`Attempts remaining: ${mfaErr.attemptsRemaining}`);
-            }
-            if (typeof mfaErr.retryAfterSeconds === "number") {
-              parts.push(`Retry after: ${mfaErr.retryAfterSeconds}s`);
-            }
-            details = parts.join(", ");
-          }
-          return sendError(res, "MFA verification failed", 400, details, code);
-        }
-      }
-      logger.error({ err }, "[MFA] Failed to verify MFA login");
+      // phi-safe:token — error object only, no actual token value logged
+      logger.warn({ err }, "[MFA] Invalid session token");
       return sendError(
         res,
-        "Failed to verify MFA",
-        500,
+        "Invalid or expired session token",
+        401,
         undefined,
-        "MFA_VERIFY_ERROR",
+        "INVALID_SESSION_TOKEN",
       );
     }
-  },
-);
+
+    // --- Consume the pending MFA session (single-use enforcement) ---
+    const sessionResult = await consumePendingMfaSession(
+      jti,
+      sessionToken,
+      userIdToVerify,
+    );
+
+    if (!sessionResult.valid) {
+      logger.warn(
+        { userId: userIdToVerify, jti, reason: sessionResult.reason },
+        "[SECURITY] Pending MFA session validation failed",
+      );
+      return sendError(
+        res,
+        sessionResult.reason === "Session already used"
+          ? "Session token has already been used. Please login again."
+          : "Invalid or expired session token",
+        401,
+        undefined,
+        "INVALID_SESSION_TOKEN",
+      );
+    }
+
+    // --- Verify the MFA code ---
+    const result = await mfaService.verifyMfaLogin(
+      userIdToVerify,
+      code,
+      credentialId,
+      isBackupCode,
+      getRequestMeta(req),
+    );
+
+    if (!result.success) {
+      return sendBadRequest(res, "MFA verification failed");
+    }
+
+    // --- Generate full session tokens with mfaVerifiedAt ---
+    const tokenResponse = await generateMfaVerifiedToken(
+      userIdToVerify,
+      userRole,
+      userOrgId,
+    );
+
+    // --- Fetch user profile for response ---
+    const user = await runAsSystemOperation(
+      async () =>
+        prisma.user.findUnique({
+          where: { id: userIdToVerify },
+          select: { id: true, email: true, role: true },
+        }),
+      { reason: "auth:mfa-verify" },
+    );
+
+    if (!user) {
+      // phi-safe:userId — surrogate key, not PHI
+      logger.error(
+        { userId: userIdToVerify },
+        "[MFA] User not found after MFA verification",
+      );
+      return sendNotFound(res, "User");
+    }
+
+    return sendSuccess(res, {
+      idToken: tokenResponse.idToken,
+      refreshToken: tokenResponse.refreshToken,
+      expiresIn: tokenResponse.expiresIn,
+      expiresAt: tokenResponse.expiresAt,
+      user: {
+        uid: user.id,
+        email: user.email,
+        role: user.role,
+      },
+    });
+  } catch (err) {
+    if (err instanceof Error && "code" in err) {
+      const mfaErr = err as {
+        code?: string;
+        attemptsRemaining?: number;
+        retryAfterSeconds?: number;
+      };
+      const code = mfaErr.code;
+
+      if (
+        code === "INVALID_CODE" ||
+        code === "INVALID_BACKUP_CODE" ||
+        code === "MFA_LOCKED"
+      ) {
+        let details: string | undefined;
+        if (
+          typeof mfaErr.attemptsRemaining === "number" ||
+          typeof mfaErr.retryAfterSeconds === "number"
+        ) {
+          const parts: string[] = [];
+          if (typeof mfaErr.attemptsRemaining === "number") {
+            parts.push(`Attempts remaining: ${mfaErr.attemptsRemaining}`);
+          }
+          if (typeof mfaErr.retryAfterSeconds === "number") {
+            parts.push(`Retry after: ${mfaErr.retryAfterSeconds}s`);
+          }
+          details = parts.join(", ");
+        }
+        return sendError(res, "MFA verification failed", 400, details, code);
+      }
+    }
+    logger.error({ err }, "[MFA] Failed to verify MFA login");
+    return sendError(
+      res,
+      "Failed to verify MFA",
+      500,
+      undefined,
+      "MFA_VERIFY_ERROR",
+    );
+  }
+});
 
 // ============================================================================
 // MFA SESSION RE-VERIFICATION
@@ -537,7 +523,7 @@ mfaRouter.post(
  * POST /v1/auth/mfa/session-reverify
  * Re-verifies MFA for an already-authenticated user whose 8-hour MFA session window expired.
  * Uses the user's existing access token (requireAuth) rather than a mfa_pending token.
- * Returns fresh auth cookies with an updated mfaVerifiedAt timestamp.
+ * Returns fresh auth tokens with an updated mfaVerifiedAt timestamp.
  */
 mfaRouter.post(
   "/session-reverify",
@@ -572,14 +558,6 @@ mfaRouter.post(
         req.user.organizationId ?? null,
       );
 
-      const isProduction = env.NODE_ENV === "production";
-      setAuthCookies(
-        res,
-        tokenResponse.idToken,
-        tokenResponse.refreshToken,
-        isProduction,
-      );
-
       logger.info(
         { userId: req.user.userId },
         "[MFA] Session re-verified successfully",
@@ -587,6 +565,8 @@ mfaRouter.post(
 
       return sendSuccess(res, {
         success: true,
+        idToken: tokenResponse.idToken,
+        refreshToken: tokenResponse.refreshToken,
         expiresIn: tokenResponse.expiresIn,
         expiresAt: tokenResponse.expiresAt,
       });

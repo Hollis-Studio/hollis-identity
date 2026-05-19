@@ -11,8 +11,8 @@
  *
  * ## Design Decisions
  *
- * - **In-memory cache primary**: Per SECURITY_ASSUMPTIONS.md, Redis is out of scope.
- *   In-memory cache provides sub-millisecond checks, acceptable for single-instance.
+ * - **Database-backed in production**: PostgreSQL stores revocation state so
+ *   ECS tasks share immediate revocation decisions.
  * - **Short TTL entries**: Entries expire when the access token would expire anyway
  *   (ACCESS_TOKEN_TTL_MS), preventing unbounded memory growth.
  * - **Graceful degradation**: If checking the denylist adds latency, it can be disabled
@@ -23,27 +23,16 @@
  *
  * ## Storage Backend
  *
- * Currently in-memory only. For multi-instance deployments, either:
- * 1. Accept per-instance denylists (eventual consistency within 15 min)
- * 2. Add PostgreSQL-backed store similar to sseTokenService
- * 3. Add Redis when it becomes available
- *
- * AUDIT-02 #6 & #37 (accepted): In-memory denylist fails open on restart and is
- * not shared across instances. Acceptable at <20 clients on single instance —
- * 15-min access token TTL limits exposure. Revisit at multi-instance scale.
+ * Production uses PostgreSQL. Tests and local development use in-memory storage
+ * to avoid requiring a database for token unit tests.
  *
  * @see authService.ts - Refresh token revocation (DB-backed)
  * @see sseTokenService.ts - Similar pattern for SSE token single-use tracking
  */
 
-// DEFERRED(audit-#15): [Scaling] In-memory token denylist is lost on process restart. Any tokens revoked
-// before the restart (logout, password change) will be accepted again until they naturally expire (15 min).
-// Severity: High | Rationale: Single-instance deployment with 10-20 users. 15-min access token TTL limits
-//   exposure window. A restart clearing the denylist is an acceptable trade-off at this scale.
-// Revisit: Before horizontal scaling or if deployment requires zero-downtime rolling restarts.
-
 import { env } from "../lib/env";
 import { logger as baseLogger } from "../lib/logger";
+import { prisma } from "../lib/prisma";
 
 const logger = baseLogger.child({ module: "tokenDenylistService" });
 
@@ -164,13 +153,7 @@ export interface TokenDenylistStore {
 // ============================================================================
 
 /**
- * In-memory token denylist store.
- *
- * **Single-instance only!**
- *
- * For multi-instance deployments:
- * - Accept eventual consistency (15 min max exposure)
- * - Or implement PostgreSQL/Redis-backed store
+ * In-memory token denylist store for local development and tests.
  */
 export class InMemoryTokenDenylistStore implements TokenDenylistStore {
   /**
@@ -323,11 +306,136 @@ export class InMemoryTokenDenylistStore implements TokenDenylistStore {
 }
 
 // ============================================================================
+// Database Store Implementation
+// ============================================================================
+
+/**
+ * PostgreSQL-backed token denylist store.
+ *
+ * This is the production default so token revocation survives process restarts
+ * and is shared across horizontally scaled ECS tasks.
+ */
+export class DatabaseTokenDenylistStore implements TokenDenylistStore {
+  private cleanupTimer: NodeJS.Timeout | null = null;
+
+  async isTokenDenied(jti: string): Promise<boolean> {
+    const entry = await prisma.accessTokenDenylistEntry.findUnique({
+      where: { jti },
+      select: { expiresAt: true },
+    });
+    if (!entry) return false;
+    if (entry.expiresAt < new Date()) {
+      await prisma.accessTokenDenylistEntry.delete({ where: { jti } }).catch(() => undefined);
+      return false;
+    }
+    return true;
+  }
+
+  async getUserDeniedAfter(userId: string): Promise<number | null> {
+    const entry = await prisma.userTokenDenylistEntry.findUnique({
+      where: { userId },
+      select: { deniedBefore: true, expiresAt: true },
+    });
+    if (!entry) return null;
+    if (entry.expiresAt < new Date()) {
+      await prisma.userTokenDenylistEntry.delete({ where: { userId } }).catch(() => undefined);
+      return null;
+    }
+    return entry.deniedBefore.getTime();
+  }
+
+  async denyToken(
+    jti: string,
+    expiresAt: Date,
+    reason: RevocationReason,
+  ): Promise<void> {
+    await prisma.accessTokenDenylistEntry.upsert({
+      where: { jti },
+      update: { expiresAt, reason, revokedAt: new Date() },
+      create: { jti, expiresAt, reason },
+    });
+  }
+
+  async denyAllUserTokens(
+    userId: string,
+    issuedBefore: Date,
+    reason: RevocationReason,
+  ): Promise<void> {
+    await prisma.userTokenDenylistEntry.upsert({
+      where: { userId },
+      update: {
+        deniedBefore: issuedBefore,
+        reason,
+        expiresAt: new Date(Date.now() + ACCESS_TOKEN_TTL_MS),
+        revokedAt: new Date(),
+      },
+      create: {
+        userId,
+        deniedBefore: issuedBefore,
+        reason,
+        expiresAt: new Date(Date.now() + ACCESS_TOKEN_TTL_MS),
+      },
+    });
+  }
+
+  async cleanup(): Promise<number> {
+    const now = new Date();
+    const [tokens, users] = await prisma.$transaction([
+      prisma.accessTokenDenylistEntry.deleteMany({ where: { expiresAt: { lt: now } } }),
+      prisma.userTokenDenylistEntry.deleteMany({ where: { expiresAt: { lt: now } } }),
+    ]);
+    return tokens.count + users.count;
+  }
+
+  async clear(): Promise<void> {
+    await prisma.$transaction([
+      prisma.accessTokenDenylistEntry.deleteMany(),
+      prisma.userTokenDenylistEntry.deleteMany(),
+    ]);
+  }
+
+  async count(): Promise<{ tokens: number; users: number }> {
+    const [tokens, users] = await prisma.$transaction([
+      prisma.accessTokenDenylistEntry.count(),
+      prisma.userTokenDenylistEntry.count(),
+    ]);
+    return { tokens, users };
+  }
+
+  startCleanupTimer(): void {
+    if (this.cleanupTimer) return;
+
+    this.cleanupTimer = setInterval(async () => {
+      try {
+        const cleaned = await this.cleanup();
+        if (cleaned > 0 && env.NODE_ENV !== "test") {
+          logger.debug({ cleaned }, "Cleaned up expired database denylist entries");
+        }
+      } catch (err) {
+        logger.error({ err }, "tokenDenylistService: database cleanup failed");
+      }
+    }, CLEANUP_INTERVAL_MS);
+
+    this.cleanupTimer.unref();
+  }
+
+  stopCleanupTimer(): void {
+    if (this.cleanupTimer) {
+      clearInterval(this.cleanupTimer);
+      this.cleanupTimer = null;
+    }
+  }
+}
+
+// ============================================================================
 // Singleton Instance & Public API
 // ============================================================================
 
-// Singleton store instance
-const store = new InMemoryTokenDenylistStore();
+// Singleton store instance. Production uses PostgreSQL so revocation survives
+// process restarts and is shared across all ECS tasks.
+const store: TokenDenylistStore = env.NODE_ENV === "production"
+  ? new DatabaseTokenDenylistStore()
+  : new InMemoryTokenDenylistStore();
 
 // Start cleanup timer on module load (except in tests)
 if (env.NODE_ENV !== "test") {

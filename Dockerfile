@@ -32,6 +32,6 @@ COPY --from=build /workspace/hollis-identity/dist ./dist
 COPY --from=build /workspace/hollis-identity/prisma ./prisma
 COPY package.json ./
 
-EXPOSE 3001
+EXPOSE 4001
 
 CMD ["node", "dist/index.js"]

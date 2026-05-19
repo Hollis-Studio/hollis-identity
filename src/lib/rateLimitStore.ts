@@ -1,5 +1,8 @@
 /**
- * @ai-context Rate limit store abstraction for Identity Service (in-memory only).
+ * @ai-context Rate limit store abstraction for Identity Service local middleware.
+ *
+ * App-level limiters are in-memory defense-in-depth. Production edge-level
+ * rate enforcement is owned by AWS WAF in the Terraform stack.
  */
 
 export interface RateLimitStoreHealth {

@@ -8,18 +8,17 @@
  * Routes deliberately NOT included here (separate follow-up agents):
  *   - MFA challenge/verify  — W6f-mfa
  *
- * deps: express, zod, jsonwebtoken, authService, cookieConfig, prisma
- * consumers: index.ts (mounted at /v1/auth), @hollis-studio/auth-client (GET /verify)
+ * deps: express, zod, jsonwebtoken, authService, prisma
+ * consumers: index.ts (mounted at /v1/auth), @hollis-studio/auth-client (/verify)
  */
 
-import { type MfaLoginPendingResponse } from "@hollis-studio/contracts";
+import { AUDIENCES, type Audience, type MfaLoginPendingResponse } from "@hollis-studio/contracts";
 import { passwordSchema } from "@hollis-studio/contracts/password";
 import { Router, type Request, type Response } from "express";
 import crypto from "crypto";
 import jwt from "jsonwebtoken";
 import { z } from "zod";
-import { AUTH_COOKIES, clearAuthCookies, getRefreshTokenCookieOptions, setAuthCookies } from "../lib/cookieConfig";
-import { env } from "../lib/env";
+import { getPublicJwks, verifyJwt } from "../lib/jwtKeys";
 import { logger } from "../lib/logger";
 import { hashPassword } from "../lib/passwordHashing";
 import { prisma, type UserRole } from "../lib/prisma";
@@ -27,6 +26,7 @@ import { runAsSystemOperation } from "../lib/tenantContext";
 import { authenticateToken } from "../middleware/auth";
 import * as authService from "../services/authService";
 import { AuthError } from "../services/authService";
+import { sendPasswordResetEmail } from "../services/emailService";
 import { getMfaStatus } from "../services/mfaService";
 import {
   OAUTH_ERROR_CODE,
@@ -68,6 +68,12 @@ const logoutBodySchema = z.object({
 
 const refreshBodySchema = z.object({
   refreshToken: z.string().optional(),
+  previousAccessToken: z.string().optional(),
+});
+
+const verifyBodySchema = z.object({
+  token: z.string().min(1),
+  audience: z.enum(AUDIENCES).optional(),
 });
 
 // W6f-flows schemas
@@ -99,6 +105,7 @@ const resetPasswordBodySchema = z.object({
 const changePasswordBodySchema = z.object({
   currentPassword: z.string().min(1, "Current password is required"),
   newPassword: passwordSchema,
+  currentRefreshToken: z.string().optional(),
 });
 
 // ============================================================================
@@ -107,8 +114,6 @@ const changePasswordBodySchema = z.object({
 
 authRouter.post("/login", async (req: Request, res: Response) => {
   // auth-public: unauthenticated login endpoint
-  const isProduction = env.NODE_ENV === "production";
-
   const parseResult = loginBodySchema.safeParse(req.body);
   if (!parseResult.success) {
     sendBadRequest(res, parseResult.error.issues[0]?.message ?? "Invalid request body");
@@ -157,9 +162,6 @@ authRouter.post("/login", async (req: Request, res: Response) => {
 
     const result = await authService.issueAuthenticatedSession(authenticatedUser, "login");
 
-    // Set httpOnly cookies for web clients; tokens also returned in body for mobile
-    setAuthCookies(res, result.idToken, result.refreshToken, isProduction);
-
     res.json({
       success: true,
       data: {
@@ -198,8 +200,6 @@ authRouter.post("/register", async (req: Request, res: Response) => {
   // auth-public: unauthenticated registration for Workouts / greenfield users.
   // Creates a User with email + passwordHash + role=CLIENT (default). No barcode,
   // no clinicalProfile, no organizationId required.
-  const isProduction = env.NODE_ENV === "production";
-
   const parseResult = registerBodySchema.safeParse(req.body);
   if (!parseResult.success) {
     sendBadRequest(res, parseResult.error.issues[0]?.message ?? "Invalid request body");
@@ -248,9 +248,6 @@ authRouter.post("/register", async (req: Request, res: Response) => {
 
     const result = await authService.issueAuthenticatedSession(authenticatedUser, "register");
 
-    // Set httpOnly cookies for web clients
-    setAuthCookies(res, result.idToken, result.refreshToken, isProduction);
-
     sendCreated(res, {
       profile: result.profile,
       idToken: result.idToken,
@@ -272,8 +269,6 @@ authRouter.post("/logout", async (req: Request, res: Response) => {
   // auth-public: logout revokes tokens, no access token required
   // Note: pushService.deleteDevicesForUser was removed in W6d — authService.logout
   // only revokes the refresh token in DB. No push service calls here.
-  const isProduction = env.NODE_ENV === "production";
-
   const parseResult = logoutBodySchema.safeParse(req.body);
   if (!parseResult.success) {
     sendBadRequest(res, parseResult.error.issues[0]?.message ?? "Invalid request body");
@@ -281,14 +276,9 @@ authRouter.post("/logout", async (req: Request, res: Response) => {
   }
 
   try {
-    // Prefer cookie-based token; fall back to body for API clients
-    const refreshToken: string | undefined =
-      (req.cookies as Record<string, string> | undefined)?.[AUTH_COOKIES.REFRESH_TOKEN] ??
-      parseResult.data.refreshToken;
+    const refreshToken = parseResult.data.refreshToken;
 
     await authService.logout(refreshToken);
-
-    clearAuthCookies(res, isProduction);
 
     res.json({ success: true, data: { ok: true } });
   } catch (error) {
@@ -304,8 +294,6 @@ authRouter.post("/logout", async (req: Request, res: Response) => {
 
 authRouter.post("/refresh", async (req: Request, res: Response) => {
   // auth-public: uses refresh token (not access token) to issue a new token pair
-  const isProduction = env.NODE_ENV === "production";
-
   const parseResult = refreshBodySchema.safeParse(req.body);
   if (!parseResult.success) {
     sendBadRequest(res, parseResult.error.issues[0]?.message ?? "Invalid request body");
@@ -313,25 +301,20 @@ authRouter.post("/refresh", async (req: Request, res: Response) => {
   }
 
   try {
-    // Prefer cookie-based token; fall back to body for biometric / API clients
-    const refreshToken: string | undefined =
-      (req.cookies as Record<string, string> | undefined)?.[AUTH_COOKIES.REFRESH_TOKEN] ??
-      parseResult.data.refreshToken;
+    const refreshToken = parseResult.data.refreshToken;
 
     if (!refreshToken) {
       sendUnauthorized(res, "No refresh token provided");
       return;
     }
 
-    // MFA carry-forward: decode the expired access token to check for mfaVerifiedAt.
+    // MFA carry-forward: decode the previous access token to check for mfaVerifiedAt.
     // This prevents clinical/admin users from being forced to re-complete MFA on every
     // 15-min access token expiry while the MFA session window (8h) is still valid.
     let previousMfaVerifiedAt: number | undefined;
-    const expiredAccessToken: string | undefined =
-      (req.cookies as Record<string, string> | undefined)?.[AUTH_COOKIES.ACCESS_TOKEN];
-    if (expiredAccessToken) {
+    if (parseResult.data.previousAccessToken) {
       try {
-        const decoded = jwt.decode(expiredAccessToken) as { mfaVerifiedAt?: number } | null;
+        const decoded = jwt.decode(parseResult.data.previousAccessToken) as { mfaVerifiedAt?: number } | null;
         if (decoded?.mfaVerifiedAt != null) {
           previousMfaVerifiedAt = decoded.mfaVerifiedAt;
         }
@@ -341,8 +324,6 @@ authRouter.post("/refresh", async (req: Request, res: Response) => {
     }
 
     const result = await authService.refresh(refreshToken, previousMfaVerifiedAt);
-
-    setAuthCookies(res, result.idToken, result.refreshToken, isProduction);
 
     res.json({
       success: true,
@@ -357,9 +338,7 @@ authRouter.post("/refresh", async (req: Request, res: Response) => {
   } catch (error) {
     req.log?.error({ err: error }, "Refresh error");
 
-    if (error instanceof AuthError) {
-      clearAuthCookies(res, env.NODE_ENV === "production");
-
+  if (error instanceof AuthError) {
       if (error.code === "TOKEN_REUSE_DETECTED") {
         sendUnauthorized(res, "Session revoked due to token reuse - please log in again");
         return;
@@ -377,10 +356,20 @@ authRouter.post("/refresh", async (req: Request, res: Response) => {
 });
 
 // ============================================================================
-// GET /verify
+// GET|POST /verify
 // ============================================================================
 
-authRouter.get("/verify", async (req: Request, res: Response) => {
+function getVerifyAudience(rawAudience: string | undefined): Audience | undefined {
+  if (!rawAudience) return undefined;
+  return AUDIENCES.find((audience) => audience === rawAudience);
+}
+
+function verifyIdentityToken(token: string, audience?: Audience): Record<string, unknown> {
+  const verifyOptions = audience ? { audience } : undefined;
+  return verifyJwt<Record<string, unknown>>(token, verifyOptions);
+}
+
+export async function verifyTokenGetHandler(req: Request, res: Response): Promise<void> {
   // auth-public: verifies a Bearer token and returns AccessTokenClaims as JSON.
   // Used by @hollis-studio/auth-client's remote verify path when offline JWT verification
   // is not suitable (e.g., first request before JWKS is cached).
@@ -394,14 +383,77 @@ authRouter.get("/verify", async (req: Request, res: Response) => {
   const token = authHeader.substring(7);
 
   try {
-    const jwtSecret = env.JWT_SECRET;
-    const decoded = jwt.verify(token, jwtSecret) as Record<string, unknown>;
+    const audience = getVerifyAudience(typeof req.query.audience === "string" ? req.query.audience : undefined);
+    const decoded = verifyIdentityToken(token, audience);
 
     // Return the raw decoded claims — audience validation is the consumer's responsibility
     res.json({ success: true, data: decoded });
   } catch (error) {
     logger.debug({ err: error, component: "auth/verify" }, "Token verification failed");
     sendUnauthorized(res, "Invalid or expired token");
+  }
+}
+
+export async function verifyTokenPostHandler(req: Request, res: Response): Promise<void> {
+  const parseResult = verifyBodySchema.safeParse(req.body);
+  if (!parseResult.success) {
+    sendBadRequest(res, parseResult.error.issues[0]?.message ?? "Invalid request body");
+    return;
+  }
+
+  try {
+    const decoded = verifyIdentityToken(parseResult.data.token, parseResult.data.audience);
+    res.json({ success: true, data: decoded, claims: decoded });
+  } catch (error) {
+    logger.debug({ err: error, component: "auth/verify" }, "Token verification failed");
+    sendUnauthorized(res, "Invalid or expired token");
+  }
+}
+
+authRouter.get("/verify", verifyTokenGetHandler);
+authRouter.post("/verify", verifyTokenPostHandler);
+
+// ============================================================================
+// GET /me
+// ============================================================================
+
+authRouter.get("/me", authenticateToken, async (req: Request, res: Response) => {
+  const userId = req.user?.userId;
+  if (!userId) {
+    sendUnauthorized(res, "Authentication required");
+    return;
+  }
+
+  try {
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: {
+        id: true,
+        email: true,
+        role: true,
+        organizationId: true,
+        isActive: true,
+        createdAt: true,
+        updatedAt: true,
+      },
+    });
+
+    if (!user || !user.isActive) {
+      sendUnauthorized(res, "Account not active");
+      return;
+    }
+
+    sendSuccess(res, {
+      userId: user.id,
+      email: user.email,
+      role: user.role,
+      organizationId: user.organizationId,
+      createdAt: user.createdAt.toISOString(),
+      updatedAt: user.updatedAt.toISOString(),
+    });
+  } catch (error) {
+    req.log?.error({ err: error }, "Failed to load identity profile");
+    sendError(res, "Failed to load identity profile", 500, undefined, "PROFILE_LOAD_ERROR");
   }
 });
 
@@ -422,8 +474,6 @@ authRouter.post("/oauth", async (req: Request, res: Response) => {
 
   const { provider, idToken, nonce, csrfState, authorizationCode, fullName, accessToken } =
     parseResult.data;
-  const isProduction = env.NODE_ENV === "production";
-
   try {
     const session = await verifyOAuthCredentials({
       provider,
@@ -434,8 +484,6 @@ authRouter.post("/oauth", async (req: Request, res: Response) => {
       fullName,
       accessToken,
     });
-
-    setAuthCookies(res, session.idToken, session.refreshToken, isProduction);
 
     res.json({ success: true, data: session });
   } catch (error) {
@@ -509,13 +557,11 @@ authRouter.post("/forgot-password", async (req: Request, res: Response) => {
         const result = await passwordResetService.createPasswordResetToken(email);
 
         if (result) {
-          // TODO(W6h): replace log stub with webhook/queue event so consumer apps can send
-          // the password reset email via their own infrastructure (SES, SendGrid, etc.).
-          // Identity Service does NOT send email directly.
-          logger.info(
-            { userId: "redacted", expiresAt: result.expiresAt },
-            "[TODO:W6h] Password reset token created — emit reset.requested event to webhook/queue",
-          );
+          await sendPasswordResetEmail({
+            email,
+            token: result.plainToken,
+            expiresAt: result.expiresAt,
+          });
         }
       } catch (error) {
         // Log internally but swallow — anti-enumeration requires consistent 200 response.
@@ -588,7 +634,7 @@ authRouter.post("/change-password", authenticateToken, async (req: Request, res:
     return;
   }
 
-  const { currentPassword, newPassword } = parseResult.data;
+  const { currentPassword, newPassword, currentRefreshToken } = parseResult.data;
   const userId = req.user?.userId;
 
   if (!userId) {
@@ -601,15 +647,9 @@ authRouter.post("/change-password", authenticateToken, async (req: Request, res:
     async () => {
       try {
         // Derive current refresh token hash so changePassword can keep the current session.
-        const currentRefreshToken: string | undefined =
-          (req.cookies as Record<string, string> | undefined)?.[AUTH_COOKIES.REFRESH_TOKEN];
-        let currentRefreshTokenHash: string | undefined;
-        if (currentRefreshToken) {
-          currentRefreshTokenHash = crypto
-            .createHash("sha256")
-            .update(currentRefreshToken)
-            .digest("hex");
-        }
+        const currentRefreshTokenHash = currentRefreshToken
+          ? crypto.createHash("sha256").update(currentRefreshToken).digest("hex")
+          : undefined;
 
         // changePassword verifies currentPassword, rehashes newPassword, revokes other sessions,
         // and denies access tokens — see passwordResetService.changePassword.
@@ -694,8 +734,11 @@ authRouter.post("/biometric-token", authenticateToken, async (req: Request, res:
 // /v1/auth. It is defined here as an exported handler for clean wiring in index.ts.
 // ============================================================================
 
-// TODO(W6h): migrate to RS256 + publish JWK. HS256 has no public key to publish.
-// Consumers using @hollis-studio/auth-client currently use the remote /verify endpoint.
 export function jwksHandler(_req: Request, res: Response): void {
-  res.json({ keys: [] });
+  try {
+    res.json(getPublicJwks());
+  } catch (error) {
+    logger.error({ err: error, component: "auth/jwks" }, "JWKS export failed");
+    sendError(res, "JWKS unavailable", 500, undefined, "JWKS_UNAVAILABLE");
+  }
 }

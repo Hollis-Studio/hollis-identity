@@ -1,0 +1,8 @@
+aws_account_id      = "344345273019"
+aws_region          = "us-east-1"
+environment         = "dev"
+identity_domain_name = "identity.dev.hollis.health"
+cors_origins        = "http://localhost:3000,http://localhost:3001"
+certificate_arn     = ""
+desired_count       = 2
+db_multi_az         = false
