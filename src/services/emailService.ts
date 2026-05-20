@@ -29,6 +29,20 @@ function buildResetUrl(token: string): string {
   return url.toString();
 }
 
+function buildVerifyUrl(token: string): string {
+  const env = getEnv();
+  // Fall back to RESET_PASSWORD_URL base if VERIFY_EMAIL_URL not set
+  const baseUrl = env.VERIFY_EMAIL_URL ?? env.RESET_PASSWORD_URL;
+  if (!baseUrl) {
+    throw new Error("VERIFY_EMAIL_URL is required to send email verification");
+  }
+  const base = new URL(baseUrl);
+  // Use the verify-email path on the same origin
+  const url = new URL("/verify-email", base.origin);
+  url.searchParams.set("token", token);
+  return url.toString();
+}
+
 export async function sendPasswordResetEmail(params: {
   email: string;
   token: string;
@@ -62,6 +76,51 @@ export async function sendPasswordResetEmail(params: {
             Data:
               "Use this link to reset your Hollis password:\n\n" +
               `${resetUrl}\n\n` +
+              `This link expires at ${params.expiresAt.toISOString()}.`,
+          },
+        },
+      },
+    },
+  }));
+}
+
+// ============================================================================
+// Email verification
+// ============================================================================
+
+export async function sendEmailVerificationEmail(params: {
+  email: string;
+  token: string;
+  expiresAt: Date;
+}): Promise<void> {
+  const env = getEnv();
+  const verifyUrl = buildVerifyUrl(params.token);
+
+  if (env.EMAIL_PROVIDER === "console") {
+    logger.info(
+      { email: params.email, verifyUrl, expiresAt: params.expiresAt },
+      "Email verification console delivery",
+    );
+    return;
+  }
+
+  await getSesClient().send(new SendEmailCommand({
+    FromEmailAddress: env.EMAIL_FROM,
+    Destination: {
+      ToAddresses: [params.email],
+    },
+    Content: {
+      Simple: {
+        Subject: {
+          Data: "Verify your Hollis email address",
+          Charset: "UTF-8",
+        },
+        Body: {
+          Text: {
+            Charset: "UTF-8",
+            Data:
+              "Please verify your Hollis email address by clicking the link below:\n\n" +
+              `${verifyUrl}\n\n` +
               `This link expires at ${params.expiresAt.toISOString()}.`,
           },
         },

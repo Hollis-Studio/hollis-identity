@@ -32,6 +32,21 @@ enum UserRole {
   CLIENT
 }
 
+/// Auth audit event types for persistent audit trail
+enum AuthAuditEventType {
+  LOGIN_SUCCESS
+  LOGIN_FAILED
+  REGISTER_SUCCESS
+  REGISTER_FAILED
+  LOGOUT
+  TOKEN_REFRESH_SUCCESS
+  TOKEN_REFRESH_FAILED
+  PASSWORD_RESET_REQUESTED
+  PASSWORD_RESET_COMPLETED
+  EMAIL_VERIFICATION_SENT
+  EMAIL_VERIFICATION_COMPLETED
+}
+
 /// MFA credential types
 enum MfaCredentialType {
   TOTP // Time-based one-time password (Google Authenticator, Authy, etc.)
@@ -67,11 +82,12 @@ model User {
   /// Opaque Identity user id used as database PK, API route param, JWT subject,
   /// and foreign key. Existing Health users may retain HH barcode ids, while new
   /// Identity-created users may be UUIDs. Do not rely on the id format.
-  id           String   @id
-  email        String   @unique
-  passwordHash String
-  role         UserRole @default(CLIENT)
-  isActive     Boolean  @default(true)
+  id            String    @id
+  email         String    @unique
+  passwordHash  String
+  role          UserRole  @default(CLIENT)
+  isActive      Boolean   @default(true)
+  emailVerified DateTime?
 
   // ============================================================================
   // Organization scoping — NULLABLE in Identity Service
@@ -102,6 +118,12 @@ model User {
 
   // Social sign-in OAuth account links
   oAuthAccounts OAuthAccount[]
+
+  // Email verification tokens
+  emailVerificationTokens EmailVerificationToken[]
+
+  // Auth audit log entries
+  authAuditLogs AuthAuditLog[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -348,6 +370,59 @@ model PasswordResetToken {
 // ============================================================================
 // OAuth Account Linking
 // ============================================================================
+
+// ============================================================================
+// Email Verification
+// ============================================================================
+
+/// Single-use tokens for email address verification.
+/// Plain token is sent via email; only SHA-256 hash is stored.
+model EmailVerificationToken {
+  id        String    @id @default(uuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+// ============================================================================
+// Auth Audit Log
+// ============================================================================
+
+/// Persistent auth-layer audit trail. Written for login, register, logout,
+/// password reset, token refresh, and email verification events.
+/// Additive — does not replace MfaEvent rows.
+model AuthAuditLog {
+  id        String             @id @default(uuid())
+
+  /// The user the event concerns. Nullable because failed logins may target
+  /// a non-existent email address (userId is unknown in that case).
+  actorId   String?
+  actor     User?              @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  eventType AuthAuditEventType
+
+  /// Whether the action succeeded.
+  success   Boolean            @default(true)
+
+  /// Request metadata for security analysis.
+  ipAddress String?
+  userAgent String?
+
+  /// Additional event-specific data (e.g., failure reason, token family).
+  metadata  Json?
+
+  createdAt DateTime           @default(now())
+
+  @@index([actorId, createdAt])
+  @@index([eventType, success])
+  @@index([createdAt])
+}
 
 /// Links an OAuth provider identity (sub) to an existing Hollis user.
 ///

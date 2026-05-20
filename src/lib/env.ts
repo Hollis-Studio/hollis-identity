@@ -168,10 +168,16 @@ const envSchema = z.object({
   // AWS (for future email/SES)
   AWS_REGION: z.string().optional(),
 
-  // Email (for password reset notification)
+  // Email (for password reset + verification notifications)
   EMAIL_PROVIDER: z.enum(["console", "ses"]).default("console"),
   EMAIL_FROM: z.string().email().default("noreply@hollis.health"),
   RESET_PASSWORD_URL: urlSchema.optional(),
+  VERIFY_EMAIL_URL: urlSchema.optional(),
+
+  // Sentry
+  SENTRY_DSN: z.string().optional(),
+  SENTRY_ENVIRONMENT: z.string().optional(),
+  SENTRY_TRACES_SAMPLE_RATE: z.coerce.number().min(0).max(1).default(0.1),
 
   // Observability
   APP_VERSION: z.string().optional(),
@@ -307,6 +313,11 @@ export function validateEnvOnStartup(): void {
     }
     if (validated.EMAIL_PROVIDER === "ses" && !validated.RESET_PASSWORD_URL) {
       errors.push("EMAIL_PROVIDER=ses but RESET_PASSWORD_URL is not set.");
+    }
+    if (!validated.SENTRY_DSN) {
+      warnings.push(
+        "SENTRY_DSN is not configured — crash reporting is disabled.",
+      );
     }
   }
 

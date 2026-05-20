@@ -27,6 +27,8 @@ import { authenticateToken } from "../middleware/auth";
 import * as authService from "../services/authService";
 import { AuthError } from "../services/authService";
 import { sendPasswordResetEmail } from "../services/emailService";
+import { sendVerificationEmail, confirmEmailVerification, EmailVerificationError } from "../services/emailVerificationService";
+import { writeAuditLog, extractIp } from "../services/authAuditService";
 import { getMfaStatus } from "../services/mfaService";
 import {
   OAUTH_ERROR_CODE,
@@ -156,11 +158,27 @@ authRouter.post("/login", async (req: Request, res: Response) => {
         },
       };
 
+      writeAuditLog({
+        actorId: authenticatedUser.profile.uid,
+        eventType: "LOGIN_SUCCESS",
+        success: true,
+        ipAddress: extractIp(req),
+        userAgent: req.headers["user-agent"],
+        metadata: { mfaPending: true },
+      });
       res.json({ success: true, data: mfaResponse });
       return;
     }
 
     const result = await authService.issueAuthenticatedSession(authenticatedUser, "login");
+
+    writeAuditLog({
+      actorId: authenticatedUser.profile.uid,
+      eventType: "LOGIN_SUCCESS",
+      success: true,
+      ipAddress: extractIp(req),
+      userAgent: req.headers["user-agent"],
+    });
 
     res.json({
       success: true,
@@ -174,6 +192,14 @@ authRouter.post("/login", async (req: Request, res: Response) => {
     });
   } catch (error) {
     req.log?.error({ err: error }, "Login error");
+
+    writeAuditLog({
+      eventType: "LOGIN_FAILED",
+      success: false,
+      ipAddress: extractIp(req),
+      userAgent: req.headers["user-agent"],
+      metadata: { reason: error instanceof AuthError ? error.code : "UNKNOWN" },
+    });
 
     if (error instanceof AuthError) {
       if (
@@ -248,15 +274,35 @@ authRouter.post("/register", async (req: Request, res: Response) => {
 
     const result = await authService.issueAuthenticatedSession(authenticatedUser, "register");
 
+    writeAuditLog({
+      actorId: newUser.id,
+      eventType: "REGISTER_SUCCESS",
+      success: true,
+      ipAddress: extractIp(req),
+      userAgent: req.headers["user-agent"],
+    });
+
+    // Send verification email (non-blocking — registration succeeds regardless)
+    sendVerificationEmail(newUser.id, newUser.email).catch((err: unknown) => {
+      req.log?.warn({ err }, "Failed to send verification email after registration");
+    });
+
     sendCreated(res, {
       profile: result.profile,
       idToken: result.idToken,
       refreshToken: result.refreshToken,
       expiresAt: result.expiresAt,
       provider: result.provider,
+      emailVerified: false,
     });
   } catch (error) {
     req.log?.error({ err: error }, "Register error");
+    writeAuditLog({
+      eventType: "REGISTER_FAILED",
+      success: false,
+      ipAddress: extractIp(req),
+      userAgent: req.headers["user-agent"],
+    });
     sendError(res, "Registration failed", 500, undefined, "REGISTER_ERROR");
   }
 });
@@ -279,6 +325,14 @@ authRouter.post("/logout", async (req: Request, res: Response) => {
     const refreshToken = parseResult.data.refreshToken;
 
     await authService.logout(refreshToken);
+
+    writeAuditLog({
+      actorId: req.user?.userId,
+      eventType: "LOGOUT",
+      success: true,
+      ipAddress: extractIp(req),
+      userAgent: req.headers["user-agent"],
+    });
 
     res.json({ success: true, data: { ok: true } });
   } catch (error) {
@@ -325,6 +379,14 @@ authRouter.post("/refresh", async (req: Request, res: Response) => {
 
     const result = await authService.refresh(refreshToken, previousMfaVerifiedAt);
 
+    writeAuditLog({
+      actorId: result.profile.uid,
+      eventType: "TOKEN_REFRESH_SUCCESS",
+      success: true,
+      ipAddress: extractIp(req),
+      userAgent: req.headers["user-agent"],
+    });
+
     res.json({
       success: true,
       data: {
@@ -337,6 +399,14 @@ authRouter.post("/refresh", async (req: Request, res: Response) => {
     });
   } catch (error) {
     req.log?.error({ err: error }, "Refresh error");
+
+    writeAuditLog({
+      eventType: "TOKEN_REFRESH_FAILED",
+      success: false,
+      ipAddress: extractIp(req),
+      userAgent: req.headers["user-agent"],
+      metadata: { reason: error instanceof AuthError ? error.code : "UNKNOWN" },
+    });
 
   if (error instanceof AuthError) {
       if (error.code === "TOKEN_REUSE_DETECTED") {
@@ -562,6 +632,12 @@ authRouter.post("/forgot-password", async (req: Request, res: Response) => {
             token: result.plainToken,
             expiresAt: result.expiresAt,
           });
+          writeAuditLog({
+            eventType: "PASSWORD_RESET_REQUESTED",
+            success: true,
+            ipAddress: extractIp(req),
+            userAgent: req.headers["user-agent"],
+          });
         }
       } catch (error) {
         // Log internally but swallow — anti-enumeration requires consistent 200 response.
@@ -598,6 +674,13 @@ authRouter.post("/reset-password", async (req: Request, res: Response) => {
         // resetPassword validates the token, rehashes the password, revokes all refresh tokens,
         // and denies all active access tokens via the denylist — see passwordResetService.
         await passwordResetService.resetPassword(token, newPassword);
+
+        writeAuditLog({
+          eventType: "PASSWORD_RESET_COMPLETED",
+          success: true,
+          ipAddress: extractIp(req),
+          userAgent: req.headers["user-agent"],
+        });
 
         res.json({ success: true, data: { ok: true } });
       } catch (error) {
@@ -725,6 +808,107 @@ authRouter.post("/biometric-token", authenticateToken, async (req: Request, res:
   } catch (error) {
     req.log?.error({ err: error }, "Failed to generate biometric token");
     sendError(res, "Failed to generate biometric token", 500, undefined, "BIOMETRIC_TOKEN_ERROR");
+  }
+});
+
+// ============================================================================
+// POST /verify-email/send  — W6f-verify
+// Sends or resends a verification email for the authenticated user.
+// auth-protected: requires valid access token
+// ============================================================================
+
+authRouter.post("/verify-email/send", authenticateToken, async (req: Request, res: Response) => {
+  const userId = req.user?.userId;
+  if (!userId) {
+    sendUnauthorized(res, "Authentication required");
+    return;
+  }
+
+  try {
+    const user = await runAsSystemOperation(
+      () =>
+        prisma.user.findUnique({
+          where: { id: userId },
+          select: { email: true, emailVerified: true, isActive: true },
+        }),
+      { reason: "auth:verify-email-send", userId },
+    );
+
+    if (!user || !user.isActive) {
+      sendUnauthorized(res, "Account not active");
+      return;
+    }
+
+    if (user.emailVerified) {
+      res.json({ success: true, data: { ok: true, alreadyVerified: true } });
+      return;
+    }
+
+    await sendVerificationEmail(userId, user.email);
+
+    writeAuditLog({
+      actorId: userId,
+      eventType: "EMAIL_VERIFICATION_SENT",
+      success: true,
+      ipAddress: extractIp(req),
+      userAgent: req.headers["user-agent"],
+    });
+
+    res.json({ success: true, data: { ok: true } });
+  } catch (error) {
+    req.log?.error({ err: error }, "Failed to send verification email");
+    sendError(res, "Failed to send verification email", 500, undefined, "EMAIL_VERIFY_SEND_ERROR");
+  }
+});
+
+// ============================================================================
+// GET /verify-email/confirm?token=...  — W6f-verify
+// Consumes a single-use verification token and marks emailVerified.
+// auth-public: token carries its own authority; no session required
+// ============================================================================
+
+const confirmQuerySchema = z.object({
+  token: z.string().min(1, "token query param is required"),
+});
+
+authRouter.get("/verify-email/confirm", async (req: Request, res: Response) => {
+  const parseResult = confirmQuerySchema.safeParse(req.query);
+  if (!parseResult.success) {
+    sendBadRequest(res, parseResult.error.issues[0]?.message ?? "Missing token");
+    return;
+  }
+
+  try {
+    await runAsSystemOperation(
+      () => confirmEmailVerification(parseResult.data.token),
+      { reason: "auth:verify-email-confirm" },
+    );
+
+    writeAuditLog({
+      eventType: "EMAIL_VERIFICATION_COMPLETED",
+      success: true,
+      ipAddress: extractIp(req),
+      userAgent: req.headers["user-agent"],
+    });
+
+    res.json({ success: true, data: { ok: true } });
+  } catch (error) {
+    req.log?.error({ err: error }, "Email verification confirm error");
+
+    if (error instanceof EmailVerificationError) {
+      if (error.code === "TOKEN_EXPIRED") {
+        sendBadRequest(res, "Verification link has expired. Please request a new one.");
+        return;
+      }
+      if (error.code === "TOKEN_USED") {
+        sendBadRequest(res, "Verification link has already been used.");
+        return;
+      }
+      sendBadRequest(res, "Invalid or expired verification link.");
+      return;
+    }
+
+    sendError(res, "Email verification failed", 500, undefined, "EMAIL_VERIFY_ERROR");
   }
 });
 
