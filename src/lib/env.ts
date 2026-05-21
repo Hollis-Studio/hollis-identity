@@ -183,6 +183,14 @@ const envSchema = z.object({
   APP_VERSION: z.string().optional(),
   IMAGE_TAG: z.string().optional(),
 
+  // Feature flags
+  // ENABLE_OIDC_DISCOVERY: gate /.well-known/openid-configuration.
+  // Default false — flip true ONLY when WebAuthn + key rotation + logout webhook are shipped.
+  ENABLE_OIDC_DISCOVERY: z
+    .string()
+    .default("false")
+    .transform((val) => val === "true"),
+
   // Dev/test
   DEV_ADMIN_SECRET: optionalSecretSchema,
   DATA_MIGRATION_RUN: dataMigrationModeFlagSchema,

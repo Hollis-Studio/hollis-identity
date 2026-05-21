@@ -139,9 +139,17 @@ export function createApp(): express.Express {
 
 // ============================================================================
 // OIDC Discovery (Task 3)
+// Gated behind ENABLE_OIDC_DISCOVERY (default: false).
+// Returns 404 when disabled — less informative to scanners than 501.
+// Flip true ONLY when WebAuthn + key rotation + logout webhook are shipped.
 // ============================================================================
 
   app.get("/.well-known/openid-configuration", (_req, res) => {
+    if (!env.ENABLE_OIDC_DISCOVERY) {
+      res.status(404).json({ success: false, error: "Not found", code: "NOT_FOUND" });
+      return;
+    }
+
     const issuer = env.JWT_ISSUER ?? `http://localhost:${env.PORT}`;
     // Strip trailing slash for consistency
     const base = issuer.replace(/\/$/, "");

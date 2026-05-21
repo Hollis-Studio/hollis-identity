@@ -2,7 +2,7 @@
 
 Standalone authentication and identity service for the Hollis suite. Handles user registration, login, MFA, password reset, OAuth account linking, JWT issuance, and token revocation for all Hollis apps (Health, Workouts, and future apps).
 
-**Stack:** Express 5 + Prisma 7 + PostgreSQL + Node 20 + ECS Fargate
+**Stack:** Express 5.2.1 + Prisma 7.6 + PostgreSQL + Node 20 + ECS Fargate
 
 ---
 
@@ -74,6 +74,69 @@ Key responsibilities:
 
 ---
 
+## API routes
+
+All routes are prefixed `/v1/auth` unless noted.
+
+### Auth routes (`/v1/auth`)
+
+| Method | Path | Auth | Description |
+| ------ | ---- | ---- | ----------- |
+| `POST` | `/login` | public | Password login. Returns token pair or MFA-pending session when MFA is enrolled. |
+| `POST` | `/register` | public | Create account (Workouts / greenfield). Issues token pair immediately; queues verification email. |
+| `POST` | `/logout` | public | Revokes the refresh token in DB. Body: `{ refreshToken? }`. |
+| `POST` | `/refresh` | public | Rotates refresh token (family-rotation, reuse detection). Body: `{ refreshToken, previousAccessToken? }`. |
+| `GET`  | `/verify` | public | Verifies Bearer token; returns decoded claims. Used by `@hollis-studio/auth-client` remote path. |
+| `POST` | `/verify` | public | Same as GET verify but token in body `{ token, audience? }`. Also mirrored at root `POST /verify`. |
+| `GET`  | `/me` | bearer | Returns authenticated user profile from DB. |
+| `POST` | `/oauth` | public | Apple/Google id_token sign-in. Returns 404 `OAUTH_NO_LINKED_ACCOUNT` if no link exists (consumer must register separately). |
+| `POST` | `/forgot-password` | public | Initiates password reset; always returns `{ ok: true }` (anti-enumeration). |
+| `POST` | `/reset-password` | public | Consumes one-time token, sets new password, revokes all refresh tokens. |
+| `POST` | `/change-password` | bearer | Authenticated password change; revokes other sessions, keeps current one. |
+| `POST` | `/biometric-token` | bearer | Issues a long-TTL (7d) refresh token for mobile SecureStore biometric login. |
+| `POST` | `/verify-email/send` | bearer | Sends or resends email verification link. |
+| `GET`  | `/verify-email/confirm` | public | Consumes single-use token from email link (`?token=…`); marks `emailVerified`. |
+
+### MFA routes (`/v1/auth/mfa`)
+
+| Method | Path | Auth | Description |
+| ------ | ---- | ---- | ----------- |
+| `GET`  | `/status` | bearer | MFA enrollment status and credential list. |
+| `GET`  | `/credentials` | bearer | Lists verified MFA credentials. |
+| `DELETE` | `/credentials/:credentialId` | bearer | Removes a credential (UUID param). |
+| `POST` | `/totp/setup` | bearer | Initiates TOTP enrollment; returns `{ credentialId, secret, qrCodeUri, backupCodes }`. |
+| `POST` | `/totp/verify` | bearer | Confirms TOTP enrollment with a live code. |
+| `POST` | `/login/verify` | public | Verifies TOTP/backup code using MFA-pending session token; issues full token pair. |
+| `POST` | `/session-reverify` | bearer | Re-verifies MFA after the 8-hour session window expires; issues fresh tokens. |
+| `POST` | `/step-up` | bearer | Verifies a current MFA code and issues a 15-minute step-up token for sensitive actions. |
+| `POST` | `/backup-codes` | bearer | Regenerates backup codes (requires current TOTP code). |
+
+### Root / OIDC routes
+
+| Method | Path | Description |
+| ------ | ---- | ----------- |
+| `GET`  | `/.well-known/jwks.json` | RS256 public key set (empty key array in local HS256 mode). |
+| `GET`  | `/.well-known/openid-configuration` | OIDC discovery document (issuer, jwks_uri, token_endpoint, etc.). |
+| `GET`  | `/health` | Liveness probe with DB ping. Returns `{ ok, service, db }`. |
+
+---
+
+## Token strategy
+
+**Access tokens** are short-lived JWTs (15 minutes). Standard claims: `sub`, `iss`, `aud`, `exp`, `iat`, `jti`, `userId`, `role`, `organizationId`, `type` (`access`), `mfaEnabled`, `mfaVerifiedAt` (when MFA was verified). A `claims.hollisHealth.{ role, organizationId }` namespace is included for Health backward compatibility.
+
+**Refresh tokens** are 7-day JWTs, DB-backed (hash stored in `RefreshToken` table) with family-rotation and reuse detection. Reuse of a spent token revokes the entire token family.
+
+**Signing:** RS256 in production (`JWT_PRIVATE_KEY` + `JWT_KEY_ID`); HS256 locally (`JWT_SECRET`). JWKS is served at `/.well-known/jwks.json` (empty key set in HS256 mode). Production verification uses the public key derived from `JWT_PRIVATE_KEY` unless `JWT_PUBLIC_KEY` is explicitly set.
+
+**Revocation:** Individual access token JTIs are denylisted in the `AccessTokenDenylistEntry` table. A user-level watermark (`UserTokenDenylistEntry`) is written on password reset/change to invalidate all active access tokens for that user without enumerating them. Refresh tokens are revoked in the `RefreshToken` table.
+
+**MFA-pending tokens** (`type: mfa_pending`, 15-minute TTL) are issued by `/login` when MFA is enrolled; single-use enforcement is backed by the `PendingMfaSession` table.
+
+**Account lockout:** The `AccountLockoutEntry` Prisma model (emails and IPs hashed) is implemented and ready, but login-path enforcement is not yet wired. <!-- UNVERIFIED: lockout check call site in authenticatePasswordUser — confirm wired before production cutover -->
+
+---
+
 ## Environment variables
 
 Copy `.env.example` to `.env` and fill in values before running locally. The app process does not preload `.env`; export it before running `npm run dev`:
@@ -84,26 +147,79 @@ source .env
 set +a
 ```
 
-| Variable             | Description                                                                                      |
-| -------------------- | ------------------------------------------------------------------------------------------------ |
-| `DATABASE_URL`       | PostgreSQL connection string                                                                     |
-| `DATABASE_SSL_CA`    | Optional PEM CA bundle for production PostgreSQL TLS verification                                |
-| `JWT_SECRET`         | Secret for signing JWTs                                                                          |
-| `JWT_ALGORITHM`      | `RS256` in production; `HS256` only for local/test                                               |
-| `JWT_PRIVATE_KEY`    | PEM private key for RS256 signing                                                                |
-| `JWT_PUBLIC_KEY`     | Optional PEM public key for RS256 verification/JWKS                                              |
-| `JWT_KEY_ID`         | Key id published in JWKS                                                                         |
-| `JWT_ISSUER`         | Issuer claim placed in every JWT                                                                 |
-| `JWT_AUDIENCES`      | Comma-separated valid audiences                                                                  |
-| `ENCRYPTION_KEY`     | Secret used for MFA TOTP secret encryption                                                       |
-| `PASSWORD_PEPPER`    | Server-side pepper for password hashes                                                           |
-| `PORT`               | HTTP port (default 4001)                                                                         |
-| `LOG_LEVEL`          | Pino log level                                                                                   |
-| `CORS_ORIGINS`       | Optional comma-separated browser origins allowed to call Identity                                |
-| `EMAIL_PROVIDER`     | `console` for local/dev, `ses` for AWS production                                                |
-| `EMAIL_FROM`         | Verified sender email address                                                                    |
-| `RESET_PASSWORD_URL` | Frontend reset-password page URL used to construct reset links; this is not the Identity API URL |
-| `AWS_REGION`         | AWS region for SES when `EMAIL_PROVIDER=ses`                                                     |
+**Required at startup** (validated by `src/lib/env.ts`):
+
+| Variable             | Required | Description                                                                                      |
+| -------------------- | -------- | ------------------------------------------------------------------------------------------------ |
+| `DATABASE_URL`       | yes | PostgreSQL connection string (`postgresql://...`)                                           |
+| `JWT_SECRET`         | yes | HS256 signing secret (≥ 32 chars, high entropy). Required even when `JWT_ALGORITHM=RS256`. |
+| `ENCRYPTION_KEY`     | yes | Secret used to encrypt MFA TOTP secrets (≥ 32 chars, high entropy).                        |
+
+**JWT / token signing:**
+
+| Variable             | Required | Description                                                                                      |
+| -------------------- | -------- | ------------------------------------------------------------------------------------------------ |
+| `JWT_ALGORITHM`      | no | `RS256` in production; `HS256` for local/test (default `HS256`)                             |
+| `JWT_PRIVATE_KEY`    | prod | PEM private key for RS256 signing. Required when `JWT_ALGORITHM=RS256`.                     |
+| `JWT_PUBLIC_KEY`     | no | Optional PEM public key for RS256 verification/JWKS. Derived from `JWT_PRIVATE_KEY` if omitted. |
+| `JWT_KEY_ID`         | prod | Key ID published in JWKS (`kid`). Required when `JWT_ALGORITHM=RS256`.                      |
+| `JWT_ISSUER`         | no | `iss` claim placed in every JWT (e.g. `https://identity.hollis.health`).                    |
+| `JWT_AUDIENCES`      | no | Comma-separated valid audiences (e.g. `hollis-health,hollis-workouts`). Defaults to all audiences from `@hollis-studio/contracts`. |
+
+**Database / security:**
+
+| Variable                       | Required | Description                                                                    |
+| ------------------------------ | -------- | ------------------------------------------------------------------------------ |
+| `DATABASE_SSL_CA`              | no | PEM CA bundle for production PostgreSQL TLS verification (RDS CA).         |
+| `PASSWORD_PEPPER`              | no | Server-side pepper mixed into password hashes before bcrypt (≥ 32 chars).  |
+| `BCRYPT_COST_FACTOR`           | no | bcrypt cost factor, 10–16 (default `13`).                                   |
+| `ACCESS_TOKEN_DENYLIST_ENABLED`| no | Set to `false` to disable the PostgreSQL-backed access token denylist (default enabled). |
+
+**Server / logging:**
+
+| Variable     | Required | Description                                                          |
+| ------------ | -------- | -------------------------------------------------------------------- |
+| `PORT`       | no | HTTP port (default `4001`).                                      |
+| `LOG_LEVEL`  | no | Pino log level: `debug`, `info`, `warn`, `error` (default `info`). |
+| `LOG_DB_QUERIES` | no | Set any value to enable Prisma query logging.                    |
+| `CORS_ORIGINS` | no | Comma-separated browser origins allowed to call Identity. Unset disables CORS in production, allows all in development. |
+
+**Email:**
+
+| Variable             | Required | Description                                                                                      |
+| -------------------- | -------- | ------------------------------------------------------------------------------------------------ |
+| `EMAIL_PROVIDER`     | no | `console` (default) or `ses` for AWS SES.                                                   |
+| `EMAIL_FROM`         | no | Verified sender address (default `noreply@hollis.health`).                                  |
+| `RESET_PASSWORD_URL` | prod (SES) | Frontend reset-password page URL for link construction (not the Identity API URL).      |
+| `VERIFY_EMAIL_URL`   | no | Frontend email-verification page URL. Falls back to `RESET_PASSWORD_URL` base if unset.     |
+| `AWS_REGION`         | prod (SES) | AWS region for SES when `EMAIL_PROVIDER=ses`.                                           |
+
+**OAuth (social sign-in):**
+
+| Variable            | Required | Description                                                                          |
+| ------------------- | -------- | ------------------------------------------------------------------------------------ |
+| `APPLE_SERVICE_ID`  | no | Apple Service ID for Sign in with Apple. Omit to disable Apple OAuth.            |
+| `APPLE_TEAM_ID`     | no | Apple Team ID, used alongside `APPLE_SERVICE_ID`.                                |
+| `IOS_BUNDLE_ID`     | no | iOS bundle ID accepted as Apple audience in addition to `APPLE_SERVICE_ID`.      |
+| `GOOGLE_CLIENT_ID`  | no | Google OAuth client ID for Sign in with Google. Omit to disable Google OAuth.    |
+
+**Rate limiting:**
+
+| Variable                    | Required | Description                                                                    |
+| --------------------------- | -------- | ------------------------------------------------------------------------------ |
+| `REDIS_URL`                 | no | Redis connection URL. When set, rate limiters use Redis; otherwise in-memory. |
+| `RATE_LIMIT_REDIS_FALLBACK` | no | `memory` or `error` — behavior when Redis is unreachable (default `memory`).  |
+| `E2E_SECURITY_TEST`         | no | Set to `true` to enable rate limiting in test runs for security tests.         |
+
+**Observability / Sentry:**
+
+| Variable                     | Required | Description                                                                                 |
+| ---------------------------- | -------- | ------------------------------------------------------------------------------------------- |
+| `SENTRY_DSN`                 | no | Sentry DSN for error reporting. Omit to disable (warning printed in production).        |
+| `SENTRY_ENVIRONMENT`         | no | Sentry environment tag (defaults to `NODE_ENV`).                                        |
+| `SENTRY_TRACES_SAMPLE_RATE`  | no | Sentry performance tracing sample rate, 0–1 (default `0.1`).                           |
+| `APP_VERSION`                | no | Release version tag embedded in Sentry events.                                          |
+| `IMAGE_TAG`                  | no | Docker image tag, used as Sentry release when `APP_VERSION` is absent.                  |
 
 ---
 
@@ -122,10 +238,12 @@ Container builds install directly from GitHub Packages through a BuildKit npmrc 
 
 ```bash
 npm install
-npm run prisma:generate
-npm run prisma:migrate
+npm run prisma:generate   # generates client to prisma/generated/prisma/
+npm run prisma:migrate    # runs prisma migrate dev (creates/applies local migrations)
 npm run dev
 ```
+
+> **Note:** `npm run prisma:migrate` runs `prisma migrate dev` and is for local schema iteration only. Use `prisma migrate deploy` against staging/production databases.
 
 ## Verification
 

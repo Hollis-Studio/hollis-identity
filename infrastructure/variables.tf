@@ -100,7 +100,7 @@ variable "db_instance_class" {
 }
 
 variable "db_allocated_storage" {
-  description = "Initial RDS storage in GiB."
+  description = "Initial RDS storage in GiB. Auto-scales up to max(this, 100) GiB."
   type        = number
   default     = 20
 }
