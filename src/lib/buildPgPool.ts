@@ -10,23 +10,34 @@ function buildProductionSslConfig(): PoolConfig["ssl"] {
   return ca ? { ca, rejectUnauthorized: true } : { rejectUnauthorized: false };
 }
 
+// pg derives TLS settings from both the connection string's libpq params
+// (sslmode/sslrootcert/etc.) AND the explicit `ssl` option. Newer pg versions
+// parse `sslmode=require` as `verify-full`, which shadows our CA-based `ssl`
+// object and surfaces as "self-signed certificate in certificate chain" even
+// though the correct RDS CA is supplied. Strip libpq SSL params from the URL
+// the Pool uses so the `ssl` object is the single source of truth.
+function stripLibpqSslParams(url: string): string {
+  if (!url) return url;
+  try {
+    const u = new URL(url);
+    for (const p of ["sslmode", "ssl", "sslrootcert", "sslcert", "sslkey", "sslnegotiation"]) {
+      u.searchParams.delete(p);
+    }
+    return u.toString();
+  } catch {
+    return url;
+  }
+}
+
 export function buildPgPool(params: {
   databaseUrl: string;
   nodeEnv: string;
   poolOptions?: PoolConfig;
 }): Pool {
   const isProduction = params.nodeEnv === "production";
-  let connectionString = params.databaseUrl;
-
-  if (isProduction) {
-    try {
-      const u = new URL(params.databaseUrl);
-      u.searchParams.delete("sslmode");
-      connectionString = u.toString();
-    } catch {
-      // not a valid URL — fall through with original
-    }
-  }
+  const connectionString = isProduction
+    ? stripLibpqSslParams(params.databaseUrl)
+    : params.databaseUrl;
 
   return new Pool({
     connectionString,

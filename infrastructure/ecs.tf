@@ -56,9 +56,14 @@ resource "aws_iam_role_policy" "task_execution_secrets" {
       Resource = [
         aws_secretsmanager_secret.app.arn,
         aws_secretsmanager_secret.database.arn,
+        data.aws_secretsmanager_secret.database_ssl_ca.arn,
       ]
     }]
   })
+}
+
+data "aws_secretsmanager_secret" "database_ssl_ca" {
+  name = "hollis-prod/identity/database-ssl-ca"
 }
 
 resource "aws_iam_role" "task" {
@@ -185,6 +190,7 @@ resource "aws_ecs_task_definition" "identity" {
 
     secrets = [
       { name = "DATABASE_URL", valueFrom = "${aws_secretsmanager_secret.database.arn}:DATABASE_URL::" },
+      { name = "DATABASE_SSL_CA", valueFrom = data.aws_secretsmanager_secret.database_ssl_ca.arn },
       { name = "JWT_SECRET", valueFrom = "${aws_secretsmanager_secret.app.arn}:JWT_SECRET::" },
       { name = "JWT_PRIVATE_KEY", valueFrom = "${aws_secretsmanager_secret.app.arn}:JWT_PRIVATE_KEY::" },
       { name = "JWT_PUBLIC_KEY", valueFrom = "${aws_secretsmanager_secret.app.arn}:JWT_PUBLIC_KEY::" },
