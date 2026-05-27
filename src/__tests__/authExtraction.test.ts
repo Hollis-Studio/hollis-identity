@@ -8,6 +8,12 @@ import {
   generateAccessTokenWithJti,
   AUTH_TOKEN_TYPE,
 } from "../services/authService";
+import {
+  recordLoginFailure,
+  resetAccountLockoutStore,
+  clearAccountLockoutStoreInstance,
+  DEFAULT_LOCKOUT_CONFIG,
+} from "../lib/accountLockout";
 import { resetEnvValidation, validateEnvOnStartup } from "../lib/env";
 import type { Server } from "node:http";
 
@@ -201,5 +207,79 @@ describe("Identity HTTP auth boundary", () => {
     const response = await fetch(`${baseUrl}/v1/auth/me`);
     assert.equal(response.status, 401);
     assert.equal(response.headers.has("set-cookie"), false);
+  });
+});
+
+// ============================================================================
+// Account lockout wiring
+// ============================================================================
+
+describe("Account lockout — login route enforcement", () => {
+  let server: Server;
+  let baseUrl: string;
+  const lockedEmail = "lockout-test@example.com";
+
+  before(async () => {
+    configureEnv();
+    // Ensure in-memory store starts clean for this suite.
+    clearAccountLockoutStoreInstance();
+
+    // Seed enough failures to trigger the first lockout threshold (default: 5).
+    for (let i = 0; i < DEFAULT_LOCKOUT_CONFIG.initialThreshold; i++) {
+      await recordLoginFailure(lockedEmail, "127.0.0.1");
+    }
+
+    const { createApp } = await import("../index");
+    server = createApp().listen(0);
+    const address = server.address() as AddressInfo;
+    baseUrl = `http://127.0.0.1:${address.port}`;
+  });
+
+  after(async () => {
+    server.close();
+    await resetAccountLockoutStore();
+    clearAccountLockoutStoreInstance();
+  });
+
+  it("returns 429 with RATE_LIMIT_EXCEEDED code when account is locked", async () => {
+    const response = await fetch(`${baseUrl}/v1/auth/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: lockedEmail, password: "any-password" }),
+    });
+
+    assert.equal(response.status, 429, "locked account must return 429");
+    assert.equal(response.headers.has("set-cookie"), false);
+
+    const body = (await response.json()) as {
+      success?: boolean;
+      code?: string;
+      retryAfterSeconds?: number;
+    };
+    assert.equal(body.success, false);
+    assert.equal(body.code, "RATE_LIMIT_EXCEEDED");
+    assert.equal(typeof body.retryAfterSeconds, "number");
+    assert.ok(
+      (body.retryAfterSeconds ?? 0) > 0,
+      "retryAfterSeconds must be positive when locked",
+    );
+  });
+
+  it("does NOT return 429 for a non-locked account (lockout gate passes through)", async () => {
+    // Different email — no prior failures so the lockout check succeeds.
+    // In this test environment there is no real Postgres, so the login will
+    // fail with a 500 after passing the lockout gate (Prisma cannot connect).
+    // We only assert that the lockout gate did NOT fire (no 429), which is
+    // what we need to verify here.
+    const response = await fetch(`${baseUrl}/v1/auth/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        email: "not-locked@example.com",
+        password: "wrong",
+      }),
+    });
+
+    assert.notEqual(response.status, 429, "non-locked account must not be 429");
   });
 });

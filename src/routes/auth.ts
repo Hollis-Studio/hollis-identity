@@ -29,6 +29,7 @@ import { AuthError } from "../services/authService";
 import { sendPasswordResetEmail } from "../services/emailService";
 import { sendVerificationEmail, confirmEmailVerification, EmailVerificationError } from "../services/emailVerificationService";
 import { writeAuditLog, extractIp } from "../services/authAuditService";
+import { checkAccountLockout } from "../lib/accountLockout";
 import { getMfaStatus } from "../services/mfaService";
 import {
   OAUTH_ERROR_CODE,
@@ -44,6 +45,7 @@ import {
   sendCreated,
   sendError,
   sendSuccess,
+  sendTooManyRequests,
   sendUnauthorized,
 } from "../utils/response";
 
@@ -123,9 +125,10 @@ authRouter.post("/login", async (req: Request, res: Response) => {
   }
 
   const { email, password } = parseResult.data;
+  const ipAddress = extractIp(req) ?? "unknown";
 
   try {
-    const authenticatedUser = await authService.authenticatePasswordUser(email, password);
+    const authenticatedUser = await authService.authenticatePasswordUser(email, password, ipAddress);
 
     // Check if user has MFA enrolled. If so, return a pending MFA session token
     // rather than a full access token. MFA verification is handled by W6f-mfa routes.
@@ -202,7 +205,16 @@ authRouter.post("/login", async (req: Request, res: Response) => {
     });
 
     if (error instanceof AuthError) {
-      if (
+      if (error.code === "ACCOUNT_LOCKED") {
+        // Account is temporarily locked due to too many failed attempts.
+        // Re-check for retryAfterSeconds so we can surface it to the client.
+        const lockoutStatus = await checkAccountLockout(email);
+        sendTooManyRequests(
+          res,
+          "Account temporarily locked. Please try again later.",
+          lockoutStatus.retryAfterSeconds > 0 ? lockoutStatus.retryAfterSeconds : undefined,
+        );
+      } else if (
         error.code === "ACCOUNT_INACTIVE" ||
         error.code === "INVALID_CREDENTIALS"
       ) {
@@ -555,7 +567,7 @@ authRouter.post("/oauth", async (req: Request, res: Response) => {
       accessToken,
     });
 
-    res.json({ success: true, data: session });
+    res.json({ success: true, data: session, isNewUser: session.isNewUser });
   } catch (error) {
     req.log?.error({ err: error, provider }, "OAuth sign-in error");
 

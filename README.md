@@ -58,8 +58,28 @@ Key responsibilities:
 - Identity is cookie-agnostic. It never sets or clears auth cookies; consumers own cookie posture and mobile clients store JSON token responses.
 - Access tokens emit suite audiences and `claims.hollisHealth.{role, organizationId}` for Health compatibility during cutover.
 - `/v1/auth/verify` remains available, and root `POST /verify` matches the current `@hollis-studio/auth-client` remote verification shape.
-- `/.well-known/jwks.json` publishes the RS256 public key in production. Local HS256 mode returns an empty key set.
+- `/.well-known/jwks.json` publishes the RS256 public key in production. HS256 mode returns an empty key set (no public key to distribute).
 - Production Postgres TLS verifies certificates by default; set `DATABASE_SSL_CA` when the runtime trust store does not already include the RDS CA.
+
+### JWT signing mode — HS256 shared-secret (current Workouts flip-to-AWS model)
+
+Both `JWT_ALGORITHM=HS256` and `JWT_ALGORITHM=RS256` are supported in production. HS256 is the active mode for the Hollis Workouts integration.
+
+**Secret pairing (critical):**
+
+| Service | Env var | Value |
+|---|---|---|
+| Identity Service | `JWT_SECRET` | shared HMAC-SHA256 secret |
+| Hollis Workouts server | `IDENTITY_JWT_SECRET` | **identical value** |
+
+The Workouts server calls `createAuthClient({ jwksSecret: process.env.IDENTITY_JWT_SECRET })`. The auth-client pins to HS256 and verifies tokens locally without a network call. Both env vars MUST be provisioned with the exact same value.
+
+Generate a suitable secret:
+```sh
+openssl rand -base64 48
+```
+
+RS256 (asymmetric JWKS) remains supported for future deployments. To switch, set `JWT_ALGORITHM=RS256` with `JWT_PRIVATE_KEY` (PEM) and `JWT_KEY_ID`.
 
 ### Remaining before production cutover
 

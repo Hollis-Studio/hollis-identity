@@ -24,8 +24,9 @@ import {
 } from "@hollis-studio/contracts";
 import { getEnv } from "../lib/env";
 import { logger } from "../lib/logger";
-import { type OAuthProviderType, prisma } from "../lib/prisma";
+import { type OAuthProviderType, type UserRole, prisma } from "../lib/prisma";
 import { runAsSystemOperation } from "../lib/tenantContext";
+import { writeAuditLog } from "./authAuditService";
 import {
   ACCESS_TOKEN_EXPIRY_MS,
   generateAccessToken,
@@ -118,6 +119,8 @@ export interface OAuthAuthSession {
   refreshToken: string;
   expiresAt: string;
   onboardingCompleted: boolean;
+  /** True when this sign-in created a new Identity account (OAuth auto-registration). */
+  isNewUser: boolean;
 }
 
 // ============================================================================
@@ -297,8 +300,9 @@ const PROVIDER_TO_DB: Record<OAuthProvider, OAuthProviderType> = {
  *
  * LINK STRATEGY (in order):
  * 1. Look up by (provider, providerUserId) in OAuthAccount.
- * 2. If not found, look up by email to link to an existing account.
- * 3. If still not found, REJECT — users must be pre-registered.
+ * 2. If not found AND provider email is verified, look up by email to link to an existing account.
+ * 3. If still not found AND provider email is verified, auto-register a new User + OAuthAccount in the same txn.
+ * 4. If identity has no verified email, REJECT — email-less users cannot be created without a schema migration.
  */
 async function findOrLinkOAuthUser(
   identity: OAuthIdentity,
@@ -310,6 +314,7 @@ async function findOrLinkOAuthUser(
   email: string | null;
   displayName: string;
   isNewLink: boolean;
+  isNewUser: boolean;
   mfaEnabled: boolean;
 }> {
   return runAsSystemOperation(
@@ -350,6 +355,7 @@ async function findOrLinkOAuthUser(
             email: u.email,
             displayName: resolveDisplayName(u.email),
             isNewLink: false,
+            isNewUser: false,
             mfaEnabled: u._count.mfaCredentials > 0,
           };
         }
@@ -397,14 +403,56 @@ async function findOrLinkOAuthUser(
               email: existingUser.email,
               displayName: resolveDisplayName(existingUser.email),
               isNewLink: true,
+              isNewUser: false,
               mfaEnabled: existingUser._count.mfaCredentials > 0,
             };
           }
+
+          // No existing user found — auto-register. Identity has no verified email for this
+          // provider identity so we can create a new account. Mirror the register route exactly:
+          //   id: crypto.randomUUID(), email: lowercase, passwordHash: "" (blocks password login),
+          //   role: "CLIENT", isActive: true. All other fields default per schema.
+          const newUserId = crypto.randomUUID();
+          const newUser = await tx.user.create({
+            data: {
+              id: newUserId,
+              email: identity.email.toLowerCase(),
+              passwordHash: "", // OAuth-only account; password login is blocked by length === 0 check
+              role: "CLIENT" as UserRole,
+              isActive: true,
+            },
+          });
+
+          await tx.oAuthAccount.create({
+            data: {
+              userId: newUserId,
+              provider: PROVIDER_TO_DB[provider],
+              providerUserId: identity.sub,
+            },
+          });
+
+          logger.info(
+            { provider, userId: newUserId.slice(0, 8) },
+            "OAuth auto-registration: new user created via social sign-in",
+          );
+
+          return {
+            userId: newUser.id,
+            userRole: newUser.role,
+            organizationId: newUser.organizationId,
+            email: newUser.email,
+            displayName: resolveDisplayName(newUser.email),
+            isNewLink: true,
+            isNewUser: true,
+            mfaEnabled: false,
+          };
         }
 
+        // Provider identity has no email — cannot auto-register without a schema migration
+        // (email is non-nullable on User). Preserve the original rejection behaviour.
         throw new OAuthError(
           OAUTH_ERROR_CODE.NO_ACCOUNT_FOUND,
-          "No account found for this social sign-in. " +
+          "No account found for this social sign-in and no verified email is available to create one. " +
             "Please register or sign in with email and password first.",
         );
       }),
@@ -425,6 +473,7 @@ async function issueSession(
   displayName: string,
   provider: OAuthProvider,
   mfaEnabled: boolean,
+  isNewUser: boolean,
 ): Promise<OAuthAuthSession> {
   const idToken = generateAccessToken(userId, role, organizationId, { mfaEnabled });
 
@@ -451,6 +500,7 @@ async function issueSession(
     refreshToken,
     expiresAt,
     onboardingCompleted: false, // TODO(W6f): add onboardingCompleted to User model
+    isNewUser,
   };
 }
 
@@ -488,12 +538,24 @@ export async function verifyOAuthCredentials(
     throw err;
   }
 
-  const { userId, userRole, organizationId, email, displayName, isNewLink, mfaEnabled } =
+  const { userId, userRole, organizationId, email, displayName, isNewLink, isNewUser, mfaEnabled } =
     await findOrLinkOAuthUser(identity, provider);
 
-  logger.info({ provider, isNewLink, userId: userId.slice(0, 8) }, "OAuth sign-in successful");
+  logger.info({ provider, isNewLink, isNewUser, userId: userId.slice(0, 8) }, "OAuth sign-in successful");
 
-  return issueSession(userId, userRole, organizationId, email, displayName, provider, mfaEnabled);
+  // Emit audit event. REGISTER_SUCCESS is reused for OAuth auto-registration (no dedicated
+  // OAUTH_REGISTER enum value exists; adding one would require a schema migration for the
+  // AuthAuditEventType Postgres enum — deferred per spec).
+  if (isNewUser) {
+    writeAuditLog({
+      actorId: userId,
+      eventType: "REGISTER_SUCCESS",
+      success: true,
+      metadata: { provider, flow: "oauth_auto_registration" },
+    });
+  }
+
+  return issueSession(userId, userRole, organizationId, email, displayName, provider, mfaEnabled, isNewUser);
 }
 
 /**

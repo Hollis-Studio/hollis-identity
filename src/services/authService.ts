@@ -24,6 +24,11 @@ import { USER_ERRORS } from "../constants/errorMessages";
 import { getEnv } from "../lib/env";
 import { signJwt, verifyJwt } from "../lib/jwtKeys";
 import { logger } from "../lib/logger";
+import {
+  checkAccountLockout,
+  recordLoginFailure,
+  recordLoginSuccess,
+} from "../lib/accountLockout";
 import { rehashIfNeeded, verifyPassword } from "../lib/passwordHashing";
 import { timingSafePasswordVerify } from "../lib/securityUtils";
 import { Prisma, prisma } from "../lib/prisma";
@@ -291,8 +296,8 @@ export async function generateBiometricRefreshToken(
 /**
  * Authenticate a user with email and password.
  */
-export async function login(email: string, password: string): Promise<AuthResponse> {
-  const authenticatedUser = await authenticatePasswordUser(email, password);
+export async function login(email: string, password: string, ipAddress: string): Promise<AuthResponse> {
+  const authenticatedUser = await authenticatePasswordUser(email, password, ipAddress);
   return issueAuthenticatedSession(authenticatedUser, "login");
 }
 
@@ -333,9 +338,22 @@ export async function issueAuthenticatedSession(
 export async function authenticatePasswordUser(
   email: string,
   password: string,
+  ipAddress: string,
 ): Promise<AuthenticatedPasswordUser> {
   return runAsSystemOperation(
     async () => {
+      // SECURITY: Check account lockout BEFORE touching the DB user record or
+      // doing any password work. This prevents brute-force attacks that rotate
+      // IPs to bypass IP-level rate limiting.
+      const lockoutStatus = await checkAccountLockout(email);
+      if (lockoutStatus.isLocked) {
+        throw new AuthError(
+          "Account temporarily locked due to too many failed login attempts",
+          "ACCOUNT_LOCKED",
+          429,
+        );
+      }
+
       const user = await prisma.user.findUnique({
         where: { email },
         include: {
@@ -352,6 +370,9 @@ export async function authenticatePasswordUser(
       if (!user) {
         // SECURITY: Timing-oracle prevention.
         await timingSafePasswordVerify(password, null);
+        // Record failure against the email even when no account exists to
+        // make enumeration harder (same latency, same lockout counter growth).
+        await recordLoginFailure(email, ipAddress);
         throw new AuthError("Invalid credentials", "INVALID_CREDENTIALS");
       }
 
@@ -371,8 +392,12 @@ export async function authenticatePasswordUser(
         user.passwordHash.length === 0 ||
         !(await verifyPassword(password, user.passwordHash))
       ) {
+        await recordLoginFailure(email, ipAddress);
         throw new AuthError("Invalid credentials", "INVALID_CREDENTIALS");
       }
+
+      // Password verified — reset the failure counter.
+      await recordLoginSuccess(email);
 
       const newHash = await rehashIfNeeded(password, user.passwordHash);
       if (newHash) {

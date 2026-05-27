@@ -297,14 +297,39 @@ export function validateEnvOnStartup(): void {
   const errors: string[] = [];
 
   if (isProduction) {
-    if (validated.JWT_ALGORITHM !== "RS256") {
-      errors.push("Production Identity must use JWT_ALGORITHM=RS256.");
-    }
-    if (!validated.JWT_PRIVATE_KEY) {
-      errors.push("JWT_PRIVATE_KEY is required when NODE_ENV=production.");
-    }
-    if (!validated.JWT_KEY_ID) {
-      errors.push("JWT_KEY_ID is required when NODE_ENV=production.");
+    // Both HS256 (shared-secret, Workouts flip-to-AWS model) and RS256 (asymmetric,
+    // future default) are allowed in production. Each algorithm requires its own
+    // key material:
+    //
+    //   JWT_ALGORITHM=HS256 → requires JWT_SECRET >= 32 chars (NIST SP 800-131A
+    //     HMAC-SHA256 floor). This secret MUST be provisioned bit-for-bit identical
+    //     to the Workouts server's IDENTITY_JWT_SECRET env var so that
+    //     @hollis-studio/auth-client can verify tokens locally without a network hop.
+    //
+    //   JWT_ALGORITHM=RS256 → requires JWT_PRIVATE_KEY (PEM) and JWT_KEY_ID.
+    //     Preferred for future deployments; enables JWKS public-key distribution.
+    //
+    // NOTE: JWT_SECRET (the HS256 key) is already validated by the Zod schema above
+    // via secretSchema, which enforces >= 32 chars with mixed character classes in
+    // production. The length gate here is a belt-and-suspenders NIST floor check.
+    if (validated.JWT_ALGORITHM === "HS256") {
+      if (validated.JWT_SECRET.length < MIN_SECRET_LENGTH) {
+        errors.push(
+          `JWT_ALGORITHM=HS256 requires JWT_SECRET to be at least ${MIN_SECRET_LENGTH} characters ` +
+          `(NIST SP 800-131A HMAC-SHA256 minimum). Generate with: openssl rand -base64 32`,
+        );
+      }
+    } else if (validated.JWT_ALGORITHM === "RS256") {
+      if (!validated.JWT_PRIVATE_KEY) {
+        errors.push(
+          "JWT_ALGORITHM=RS256 requires JWT_PRIVATE_KEY (PEM-encoded RSA private key).",
+        );
+      }
+      if (!validated.JWT_KEY_ID) {
+        errors.push(
+          "JWT_ALGORITHM=RS256 requires JWT_KEY_ID (key identifier for JWKS endpoint).",
+        );
+      }
     }
     if (!validated.APPLE_SERVICE_ID) {
       warnings.push(

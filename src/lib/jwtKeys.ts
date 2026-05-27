@@ -1,8 +1,19 @@
 /**
  * @ai-context JWT key material helper | centralizes Identity token signing, verification, and JWKS export
  *
- * Production uses RS256 with a private signing key and public JWKS. HS256 remains
- * available for local tests and development only.
+ * Two production-supported signing modes (selected via JWT_ALGORITHM env var):
+ *
+ *   HS256 (shared-secret) — CURRENT supported mode for the Workouts flip-to-AWS.
+ *     Signs with JWT_SECRET (env var).  The Workouts server must be provisioned
+ *     with IDENTITY_JWT_SECRET=<same value as JWT_SECRET here> so that
+ *     @hollis-studio/auth-client can call createAuthClient({ jwksSecret: IDENTITY_JWT_SECRET })
+ *     and verify tokens locally without a network round-trip.
+ *     These two env vars MUST be identical at all times — they are the same shared
+ *     secret, just named from each service's perspective.
+ *
+ *   RS256 (asymmetric) — deferred future default. Signs with JWT_PRIVATE_KEY (PEM).
+ *     Enables JWKS public-key distribution via /.well-known/jwks.json.
+ *     Required env vars: JWT_PRIVATE_KEY, JWT_PUBLIC_KEY (optional), JWT_KEY_ID.
  */
 
 import crypto from "crypto";
