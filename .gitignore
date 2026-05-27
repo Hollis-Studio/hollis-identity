@@ -8,3 +8,8 @@ coverage/
 *.log
 prisma/generated/
 infrastructure/.terraform/
+infrastructure/terraform.tfvars
+infrastructure/*.tfplan
+# Terraform state holds secrets/ARNs — never commit it.
+infrastructure/*.tfstate
+infrastructure/*.tfstate.*

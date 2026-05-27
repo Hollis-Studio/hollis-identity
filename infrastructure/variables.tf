@@ -13,7 +13,7 @@ variable "aws_region" {
 variable "environment" {
   description = "Deployment environment name."
   type        = string
-  default     = "dev"
+  default     = "prod"
 }
 
 variable "project" {
@@ -28,20 +28,70 @@ variable "image_tag" {
   default     = "latest"
 }
 
-variable "certificate_arn" {
-  description = "ACM certificate ARN for HTTPS listener. Leave empty to create HTTP-only dev ALB."
+# ---------------------------------------------------------------------------
+# Shared infrastructure references (NEVER managed by this stack)
+# ---------------------------------------------------------------------------
+
+variable "vpc_id" {
+  description = "VPC ID that contains the shared ALB, ECS cluster, and RDS instance."
   type        = string
-  default     = ""
+  default     = "vpc-0abe755c07479d64a"
 }
+
+variable "private_subnet_ids" {
+  description = "Private subnet IDs in the shared VPC (currently unused: no NAT/VPC endpoints exist, so tasks run in public subnets instead)."
+  type        = list(string)
+  default     = ["subnet-0d5672f9161c08a46", "subnet-0d8d2cf589dcad61e"]
+}
+
+variable "public_subnet_ids" {
+  description = "Public subnet IDs in the shared VPC for ECS task placement (egress via IGW with a public IP; matches hollis-prod-api)."
+  type        = list(string)
+  default     = ["subnet-0dcd09f364647e0a3", "subnet-04d00419be5cb0802"]
+}
+
+variable "alb_name" {
+  description = "Name of the existing shared ALB to attach to."
+  type        = string
+  default     = "hollis-prod-alb"
+}
+
+variable "ecs_cluster_name" {
+  description = "Name of the existing shared ECS cluster."
+  type        = string
+  default     = "hollis-prod-cluster"
+}
+
+variable "rds_identifier" {
+  description = "Identifier of the existing shared RDS instance."
+  type        = string
+  default     = "hollis-prod-postgres"
+}
+
+variable "rds_security_group_id" {
+  description = "Security group ID already attached to hollis-prod-postgres. An additive ingress rule is appended — the SG itself is never managed by this stack."
+  type        = string
+  default     = "sg-072f4e44c43356914"
+}
+
+# ---------------------------------------------------------------------------
+# Identity-specific config
+# ---------------------------------------------------------------------------
 
 variable "identity_domain_name" {
   description = "Public host name for the Identity API and JWT issuer."
   type        = string
-  default     = "identity.dev.hollis.health"
+  default     = "identity.hollis.health"
+}
+
+variable "certificate_arn" {
+  description = "ACM wildcard certificate ARN covering identity.hollis.health. Already attached to hollis-prod-alb; referenced here only for documentation."
+  type        = string
+  default     = "arn:aws:acm:us-east-1:344345273019:certificate/89bb25b7-f69d-4af5-a6f1-fe226161eb2a"
 }
 
 variable "reset_password_url" {
-  description = "Frontend password reset page URL used in password reset emails. This is not the Identity API URL."
+  description = "Frontend password reset page URL used in password reset emails."
   type        = string
   default     = "https://hollis.health/reset-password"
 }
@@ -49,11 +99,11 @@ variable "reset_password_url" {
 variable "cors_origins" {
   description = "Comma-separated allowed browser origins."
   type        = string
-  default     = "http://localhost:3000,http://localhost:3001"
+  default     = "https://hollis.health,https://admin.hollis.health"
 }
 
 variable "jwt_audiences" {
-  description = "Comma-separated JWT audiences."
+  description = "Comma-separated JWT audiences. Must include hollis-workouts so Workouts can verify tokens."
   type        = string
   default     = "hollis-health,hollis-workouts"
 }
@@ -93,26 +143,8 @@ variable "memory" {
   default     = 1024
 }
 
-variable "db_instance_class" {
-  description = "RDS instance class."
+variable "log_level" {
+  description = "LOG_LEVEL injected into the container (debug|info|warn|error)."
   type        = string
-  default     = "db.t4g.micro"
-}
-
-variable "db_allocated_storage" {
-  description = "Initial RDS storage in GiB. Auto-scales up to max(this, 100) GiB."
-  type        = number
-  default     = 20
-}
-
-variable "db_multi_az" {
-  description = "Enable RDS Multi-AZ. Use true for staging/prod."
-  type        = bool
-  default     = false
-}
-
-variable "waf_rate_limit" {
-  description = "ALB WAF per-IP request limit over a rolling five-minute window."
-  type        = number
-  default     = 1000
+  default     = "info"
 }

@@ -1,10 +1,7 @@
 locals {
-  name        = "${var.project}-${var.environment}"
-  issuer      = "https://${var.identity_domain_name}"
-  az_count    = 2
-  vpc_cidr    = "10.42.0.0/16"
-  db_name     = "hollis_identity"
-  db_username = "hollis_identity"
+  name    = "${var.project}-${var.environment}"
+  issuer  = "https://${var.identity_domain_name}"
+  db_name = "hollis_identity"
 
   tags = {
     ManagedBy   = "terraform"
@@ -14,11 +11,11 @@ locals {
   }
 }
 
-data "aws_availability_zones" "available" {
-  state = "available"
-}
-
 data "aws_caller_identity" "current" {}
+
+# ---------------------------------------------------------------------------
+# ECR repository (new — identity-specific)
+# ---------------------------------------------------------------------------
 
 resource "aws_ecr_repository" "identity" {
   name                 = local.name
@@ -30,10 +27,18 @@ resource "aws_ecr_repository" "identity" {
   }
 }
 
+# ---------------------------------------------------------------------------
+# CloudWatch log group (new — identity-specific)
+# ---------------------------------------------------------------------------
+
 resource "aws_cloudwatch_log_group" "identity" {
   name              = "/ecs/${local.name}"
   retention_in_days = var.environment == "prod" ? 90 : 30
 }
+
+# ---------------------------------------------------------------------------
+# Generated secrets (all random values managed in Terraform state)
+# ---------------------------------------------------------------------------
 
 resource "random_password" "db" {
   length  = 32
@@ -55,13 +60,20 @@ resource "random_password" "password_pepper" {
   special = true
 }
 
+# RS256 key material — retained as unused fallback so state doesn't drift if
+# JWT_ALGORITHM is changed back to RS256 in the future.
 resource "tls_private_key" "jwt" {
   algorithm = "RSA"
   rsa_bits  = 2048
 }
 
+# ---------------------------------------------------------------------------
+# Secrets Manager — app bundle (JWT keys, encryption, pepper)
+# ---------------------------------------------------------------------------
+
 resource "aws_secretsmanager_secret" "app" {
-  name_prefix = "${local.name}/app/"
+  name        = "${local.name}/app"
+  description = "JWT keys, ENCRYPTION_KEY, and PASSWORD_PEPPER for ${local.name}."
 }
 
 resource "aws_secretsmanager_secret_version" "app" {
@@ -76,18 +88,30 @@ resource "aws_secretsmanager_secret_version" "app" {
   })
 }
 
+# ---------------------------------------------------------------------------
+# Secrets Manager — database connection string
+#
+# Points at the SHARED hollis-prod-postgres instance.
+# The hollis_identity logical database must be created out-of-band:
+#   psql "postgresql://<admin_user>:<pass>@<shared_rds_address>:5432/postgres"
+#   CREATE DATABASE hollis_identity;
+#   CREATE USER hollis_identity WITH PASSWORD '<random_password.db.result>';
+#   GRANT ALL PRIVILEGES ON DATABASE hollis_identity TO hollis_identity;
+# ---------------------------------------------------------------------------
+
 resource "aws_secretsmanager_secret" "database" {
-  name_prefix = "${local.name}/database/"
+  name        = "${local.name}/database"
+  description = "DATABASE_URL for hollis_identity on the shared hollis-prod-postgres."
 }
 
 resource "aws_secretsmanager_secret_version" "database" {
   secret_id = aws_secretsmanager_secret.database.id
   secret_string = jsonencode({
-    username     = local.db_username
+    username     = "hollis_identity"
     password     = random_password.db.result
     dbname       = local.db_name
-    host         = aws_db_instance.identity.address
-    port         = aws_db_instance.identity.port
-    DATABASE_URL = "postgresql://${local.db_username}:${random_password.db.result}@${aws_db_instance.identity.address}:${aws_db_instance.identity.port}/${local.db_name}?sslmode=require&connection_limit=20&pool_timeout=10"
+    host         = data.aws_db_instance.shared.address
+    port         = data.aws_db_instance.shared.port
+    DATABASE_URL = "postgresql://hollis_identity:${random_password.db.result}@${data.aws_db_instance.shared.address}:${data.aws_db_instance.shared.port}/${local.db_name}?sslmode=require&connection_limit=20&pool_timeout=10"
   })
 }

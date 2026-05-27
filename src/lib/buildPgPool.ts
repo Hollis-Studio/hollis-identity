@@ -2,7 +2,12 @@ import { Pool, type PoolConfig } from "pg";
 
 function buildProductionSslConfig(): PoolConfig["ssl"] {
   const ca = process.env.DATABASE_SSL_CA?.replace(/\\n/g, "\n");
-  return ca ? { ca, rejectUnauthorized: true } : { rejectUnauthorized: true };
+  // With a CA bundle, fully verify the RDS server cert. Without one, fall back
+  // to an encrypted-but-unverified connection — RDS presents a cert signed by
+  // the Amazon RDS CA, which isn't in Node's default trust store, so strict
+  // verification fails with "self-signed certificate in certificate chain".
+  // Mirrors the Workouts server's fallback; provide DATABASE_SSL_CA to harden.
+  return ca ? { ca, rejectUnauthorized: true } : { rejectUnauthorized: false };
 }
 
 export function buildPgPool(params: {

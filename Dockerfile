@@ -20,7 +20,11 @@ COPY tsconfig.json ./
 COPY src/ ./src/
 COPY prisma/ ./prisma/
 RUN npm run prisma:generate
-RUN npm run build
+# tsconfig uses moduleResolution "bundler" (extensionless imports), so raw tsc
+# output can't run under Node ESM. Bundle the app + generated Prisma client into
+# a single ESM file; keep node_modules (Prisma/pg/express) external. Identity uses
+# the PrismaPg driver adapter (no native engine binary), so this bundles cleanly.
+RUN npx --yes esbuild@0.25.0 src/index.ts --bundle --platform=node --format=esm --packages=external --outfile=dist/index.js
 
 # ---- Stage 3: runner ----
 FROM node:20-alpine AS runner
@@ -30,8 +34,10 @@ ENV NODE_ENV=production
 COPY --from=deps /workspace/hollis-identity/node_modules ./node_modules
 COPY --from=build /workspace/hollis-identity/dist ./dist
 COPY --from=build /workspace/hollis-identity/prisma ./prisma
+COPY prisma.config.ts ./
 COPY package.json ./
 
 EXPOSE 4001
 
+# esbuild emits a single bundled ESM file at dist/index.js.
 CMD ["node", "dist/index.js"]

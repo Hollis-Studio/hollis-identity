@@ -1,8 +1,29 @@
-aws_account_id      = "344345273019"
-aws_region          = "us-east-1"
-environment         = "dev"
-identity_domain_name = "identity.dev.hollis.health"
-cors_origins        = "http://localhost:3000,http://localhost:3001"
-certificate_arn     = ""
-desired_count       = 2
-db_multi_az         = false
+aws_account_id = "344345273019"
+aws_region     = "us-east-1"
+environment    = "prod"
+
+# Shared infrastructure — verified live values (2026-05-26).
+vpc_id                = "vpc-0abe755c07479d64a"
+private_subnet_ids    = ["subnet-0d5672f9161c08a46", "subnet-0d8d2cf589dcad61e"]
+alb_name              = "hollis-prod-alb"
+ecs_cluster_name      = "hollis-prod-cluster"
+rds_identifier        = "hollis-prod-postgres"
+rds_security_group_id = "sg-072f4e44c43356914"
+
+# ACM wildcard cert (covers identity.hollis.health — already on hollis-prod-alb).
+certificate_arn      = "arn:aws:acm:us-east-1:344345273019:certificate/89bb25b7-f69d-4af5-a6f1-fe226161eb2a"
+identity_domain_name = "identity.hollis.health"
+
+# Application config
+cors_origins   = "https://hollis.health,https://admin.hollis.health"
+jwt_audiences  = "hollis-health,hollis-workouts"
+email_from     = "noreply@hollis.health"
+email_provider = "ses"
+reset_password_url = "https://hollis.health/reset-password"
+
+# ECS sizing
+desired_count = 2
+cpu           = 512
+memory        = 1024
+image_tag     = "latest"
+log_level     = "info"

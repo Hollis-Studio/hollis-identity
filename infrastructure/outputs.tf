@@ -4,18 +4,18 @@ output "aws_account_id" {
 }
 
 output "ecr_repository_url" {
-  description = "ECR URL to push the container image to."
+  description = "ECR URL to push the Identity container image to."
   value       = aws_ecr_repository.identity.repository_url
 }
 
-output "alb_dns_name" {
-  description = "ALB DNS name; use for a Route 53 alias or CNAME."
-  value       = aws_lb.identity.dns_name
+output "target_group_arn" {
+  description = "ARN of the new Identity ALB target group."
+  value       = aws_lb_target_group.identity.arn
 }
 
-output "ecs_cluster_name" {
-  description = "ECS cluster name."
-  value       = aws_ecs_cluster.identity.name
+output "alb_listener_rule_arn" {
+  description = "ARN of the new Identity ALB listener rule (additive — does not modify Health's rules)."
+  value       = aws_lb_listener_rule.identity_host.arn
 }
 
 output "ecs_service_name" {
