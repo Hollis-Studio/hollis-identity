@@ -412,7 +412,7 @@ export async function authenticatePasswordUser(
       }
 
       const userMfaEnabled = user._count.mfaCredentials > 0;
-      const displayName = user.email.split("@")[0];
+      const displayName = user.displayName ?? user.email.split("@")[0];
 
       return {
         profile: {
@@ -550,6 +550,7 @@ export async function refresh(
             isActive: true,
             organizationId: true,
             email: true,
+            displayName: true,
             role: true,
             _count: {
               select: { mfaCredentials: { where: { isVerified: true } } },
@@ -668,7 +669,7 @@ export async function refresh(
         );
 
         const expiresAt = new Date(Date.now() + ACCESS_TOKEN_EXPIRY_MS).toISOString();
-        const displayName = user.email.split("@")[0];
+        const displayName = user.displayName ?? user.email.split("@")[0];
 
         return {
           profile: {

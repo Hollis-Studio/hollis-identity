@@ -63,6 +63,7 @@ const loginBodySchema = z.object({
 const registerBodySchema = z.object({
   email: z.string().email("Valid email required"),
   password: z.string().min(6, "Password must be at least 6 characters").max(128, "Password must be at most 128 characters"),
+  displayName: z.string().trim().min(1).max(128).optional(),
   role: z.enum(["ADMIN", "CLINICIAN", "TRAINER", "CLIENT"] as const).optional(),
 });
 
@@ -244,7 +245,7 @@ authRouter.post("/register", async (req: Request, res: Response) => {
     return;
   }
 
-  const { email, password, role = "CLIENT" } = parseResult.data;
+  const { email, password, displayName, role = "CLIENT" } = parseResult.data;
 
   try {
     // Check if email already registered (SECURITY: use generic error to prevent enumeration)
@@ -264,6 +265,7 @@ authRouter.post("/register", async (req: Request, res: Response) => {
         id,
         email: email.toLowerCase(),
         passwordHash,
+        displayName: displayName ?? null,
         role: role as UserRole,
         isActive: true,
       },
@@ -274,7 +276,7 @@ authRouter.post("/register", async (req: Request, res: Response) => {
       profile: {
         uid: newUser.id,
         email: newUser.email,
-        displayName: newUser.email.split("@")[0],
+        displayName: newUser.displayName ?? newUser.email.split("@")[0],
         role: newUser.role,
         organizationId: newUser.organizationId,
         isAnonymous: false,
