@@ -1,0 +1,231 @@
+# ==============================================================================
+# Identity Deploy — ECS Fargate (prod)
+# ==============================================================================
+#
+# Builds the Identity image, pushes it to ECR, and rolls the ECS service on
+# every push to main that touches application/build paths.
+#
+# Auth: GitHub OIDC → assumes the narrow `hollis-identity-prod-github-actions-deploy-role`
+# (ECR push + ECS roll only — NO infra provisioning). Defined in
+# infrastructure/github-actions-deploy.tf. No static AWS credentials.
+#
+# Gate: the job targets the `production` GitHub Environment. The OIDC trust
+# policy requires the subject `repo:Hollis-Studio/hollis-identity:environment:production`,
+# so the `environment: production` line is load-bearing for AWS auth — do not
+# remove it. Create the environment with NO required reviewers for automatic
+# deploys on push to main.
+#
+# Task definition / env / secrets are NOT managed by this workflow. It renders
+# the CURRENTLY-DEPLOYED task definition and swaps only the image, so any env
+# (e.g. GOOGLE_CLIENT_ID) and secrets stay exactly as the live task def has them.
+# Infra/env changes live in infrastructure/*.tf and are applied by a human
+# running `terraform apply` (this repo keeps Terraform state LOCAL — CI never
+# runs Terraform).
+#
+# One-time setup (see infrastructure/github-actions-deploy.tf header):
+#   1. terraform apply           # creates the deploy role
+#   2. gh secret set AWS_DEPLOY_APP_ROLE_ARN -R Hollis-Studio/hollis-identity -b "$(terraform -chdir=infrastructure output -raw github_actions_deploy_role_arn)"
+#   3. gh secret set NODE_AUTH_TOKEN -R Hollis-Studio/hollis-identity -b "<read:packages token>"
+#   4. Create the `production` GitHub Environment (no required reviewers)
+# ==============================================================================
+
+name: Identity Deploy
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "src/**"
+      - "prisma/**"
+      - "prisma.config.ts"
+      - "Dockerfile"
+      - "package.json"
+      - "package-lock.json"
+      - ".npmrc"
+      - ".github/workflows/deploy.yml"
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Existing ECR image tag to deploy (defaults to the commit SHA built by this run)."
+        required: false
+        type: string
+
+concurrency:
+  group: deploy-identity-prod
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: hollis-identity-prod
+  ECS_CLUSTER: hollis-prod-cluster
+  ECS_SERVICE: hollis-identity-prod
+  TASK_FAMILY: hollis-identity-prod
+  CONTAINER_NAME: hollis-identity
+  HEALTH_URL: https://identity.hollis.health/health
+
+permissions:
+  id-token: write # OIDC
+  contents: read
+
+jobs:
+  deploy:
+    name: Build and Deploy
+    runs-on: ubuntu-22.04
+    # Block workflow_dispatch from non-main refs; only deploy from main.
+    if: github.ref == 'refs/heads/main'
+    environment: production
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve image tag
+        id: tag
+        run: echo "value=${{ github.event.inputs.image_tag || github.sha }}" >> "$GITHUB_OUTPUT"
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_APP_ROLE_ARN }}
+          role-session-name: github-actions-deploy-identity
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # ── Build + push (skipped when deploying an already-built tag) ──────────
+      - name: Set up Docker Buildx
+        if: github.event.inputs.image_tag == ''
+        uses: docker/setup-buildx-action@v3
+
+      - name: Prepare npm auth for Docker build
+        if: github.event.inputs.image_tag == ''
+        run: |
+          cat > /tmp/npmrc-ci <<EOF
+          @hollis-studio:registry=https://npm.pkg.github.com
+          //npm.pkg.github.com/:_authToken=${{ secrets.NODE_AUTH_TOKEN }}
+          EOF
+
+      - name: Build and push image
+        if: github.event.inputs.image_tag == ''
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          # Fargate runs LINUX/X86_64 (task def runtimePlatform is unset →
+          # default). GitHub ubuntu runners are amd64, so the default build
+          # matches; pinned explicitly to prevent arch drift on runner changes.
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ steps.tag.outputs.value }}
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
+          provenance: false
+          secret-files: |
+            npmrc=/tmp/npmrc-ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Clean up npmrc secret
+        if: always()
+        run: rm -f /tmp/npmrc-ci
+
+      - name: Wait for ECR image propagation
+        run: |
+          for attempt in $(seq 1 30); do
+            if aws ecr describe-images \
+              --repository-name "$ECR_REPOSITORY" \
+              --image-ids imageTag="${{ steps.tag.outputs.value }}" \
+              --query 'imageDetails[0].imageTags' --output text 2>/dev/null \
+              | grep -q "${{ steps.tag.outputs.value }}"; then
+              echo "✅ Image ${{ steps.tag.outputs.value }} available in ECR"
+              exit 0
+            fi
+            echo "Image not ready (attempt ${attempt}/30); waiting 10s…"
+            sleep 10
+          done
+          echo "::error::ECR image not available after 5 minutes"
+          exit 1
+
+      # ── Render the CURRENT task definition with the new image ───────────────
+      # Preserves the live env (incl. GOOGLE_CLIENT_ID) and secrets; only the
+      # container image is swapped.
+      - name: Download current task definition
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition "$TASK_FAMILY" \
+            --query 'taskDefinition' \
+            > task-definition.json
+
+      - name: Render task definition
+        id: render
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: task-definition.json
+          container-name: ${{ env.CONTAINER_NAME }}
+          image: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ steps.tag.outputs.value }}
+
+      # The ECS circuit breaker can roll desiredCount to 0 after repeated
+      # failures; the deploy action then treats 0 as "stable". Restore to >=1.
+      - name: Ensure desired count >= 1
+        run: |
+          DESIRED=$(aws ecs describe-services \
+            --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE" \
+            --query 'services[0].desiredCount' --output text)
+          if [ "$DESIRED" = "0" ]; then
+            echo "desiredCount is 0 (circuit-breaker rollback); restoring to 2"
+            aws ecs update-service --cluster "$ECS_CLUSTER" --service "$ECS_SERVICE" \
+              --desired-count 2 >/dev/null
+          else
+            echo "desiredCount is ${DESIRED}"
+          fi
+
+      - name: Deploy to Amazon ECS
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.render.outputs.task-definition }}
+          service: ${{ env.ECS_SERVICE }}
+          cluster: ${{ env.ECS_CLUSTER }}
+          wait-for-service-stability: true
+          wait-for-minutes: 20
+
+      - name: Verify deployment health
+        run: |
+          echo "Waiting 45s for ALB target registration…"
+          sleep 45
+          for attempt in $(seq 1 10); do
+            CODE=$(curl -s -o /tmp/health -w "%{http_code}" --max-time 10 "$HEALTH_URL" || echo "000")
+            if [ "$CODE" = "200" ]; then
+              echo "✅ Health check passed (attempt ${attempt}): $(cat /tmp/health)"
+              exit 0
+            fi
+            echo "Health check ${CODE} (attempt ${attempt}/10); retrying in 15s…"
+            sleep 15
+          done
+          echo "::error::Health check failed after retries (last status: ${CODE})"
+          echo "--- recent container logs ---"
+          STREAMS=$(aws logs describe-log-streams \
+            --log-group-name "/ecs/${TASK_FAMILY}" \
+            --order-by LastEventTime --descending --limit 3 \
+            --query 'logStreams[*].logStreamName' --output text 2>/dev/null || echo "")
+          for S in $STREAMS; do
+            echo "=== $S ==="
+            aws logs get-log-events \
+              --log-group-name "/ecs/${TASK_FAMILY}" --log-stream-name "$S" \
+              --limit 40 --start-from-head false \
+              --query 'events[*].message' --output text 2>/dev/null || true
+          done
+          exit 1
+
+      - name: Deployment summary
+        if: always()
+        run: |
+          {
+            echo "## Deployment Summary"
+            echo ""
+            echo "- **Image tag:** \`${{ steps.tag.outputs.value }}\`"
+            echo "- **Cluster:** \`${ECS_CLUSTER}\`"
+            echo "- **Service:** \`${ECS_SERVICE}\`"
+            echo "- **Triggered by:** ${{ github.actor }}"
+            echo "- **Status:** ${{ job.status }}"
+          } >> "$GITHUB_STEP_SUMMARY"
