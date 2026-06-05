@@ -114,6 +114,12 @@ variable "jwt_audiences" {
   default     = "hollis-health,hollis-workouts"
 }
 
+variable "google_client_id" {
+  description = "Google OAuth client ID used as the expected `aud` when verifying Google id_tokens. Public value (not a secret); the mobile clients present id_tokens minted for this audience."
+  type        = string
+  default     = "669071559387-51r0f2ksiediq3rmlqpegnsvddjpndte.apps.googleusercontent.com"
+}
+
 variable "email_from" {
   description = "Verified SES sender address."
   type        = string

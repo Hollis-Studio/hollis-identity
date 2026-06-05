@@ -181,6 +181,9 @@ resource "aws_ecs_task_definition" "identity" {
       { name = "JWT_ISSUER", value = local.issuer },
       # JWT_AUDIENCES must include "hollis-workouts" so Workouts can verify tokens.
       { name = "JWT_AUDIENCES", value = var.jwt_audiences },
+      # Expected `aud` for Google id_token verification. Public OAuth client ID,
+      # not a secret. Required — Google sign-in fails closed without it.
+      { name = "GOOGLE_CLIENT_ID", value = var.google_client_id },
       { name = "CORS_ORIGINS", value = var.cors_origins },
       { name = "EMAIL_PROVIDER", value = var.email_provider },
       { name = "EMAIL_FROM", value = var.email_from },

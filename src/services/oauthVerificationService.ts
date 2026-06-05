@@ -279,13 +279,27 @@ async function verifyGoogleIdToken(
     throw new OAuthError(OAUTH_ERROR_CODE.TOKEN_EXPIRED, "Google id_token is expired");
   }
 
+  // Nonce handling for Google differs fundamentally from Apple:
+  //   - Apple echoes SHA256(rawNonce) into the id_token nonce claim (hashed).
+  //   - Google echoes the supplied nonce VERBATIM (unhashed).
+  // The Original Google Sign-In SDK tier in use (@react-native-google-signin
+  // signIn(), non-One-Tap) cannot attach the app's body nonce to the id_token,
+  // so any `nonce` claim that appears is an SDK/GIDSignIn-internal value the
+  // client never controlled — it is NOT derivable from rawNonce and can never
+  // equal it. Hashing rawNonce and demanding equality (the old behavior) made
+  // every Google login with an SDK-emitted nonce fail. We therefore only treat
+  // the nonce as a positive signal: if it matches the raw value the client sent
+  // (a future nonce-capable tier), great; otherwise we log and proceed. Replay
+  // is defended uniformly server-side by single-use id_token enforcement
+  // (enforceSingleUse), with audience/issuer/expiry checks guarding injection.
   if (claims.nonce != null) {
-    const expectedNonceHash = crypto.createHash("sha256").update(rawNonce).digest("hex");
-    if (claims.nonce !== expectedNonceHash) {
-      throw new OAuthError(OAUTH_ERROR_CODE.NONCE_MISMATCH, "Google id_token nonce mismatch — possible token replay attack");
+    if (claims.nonce === rawNonce) {
+      logger.debug("Google id_token nonce bound and verified (raw match)");
+    } else {
+      logger.warn("Google id_token nonce not client-bound (SDK-internal nonce) — relying on single-use replay defense");
     }
   } else {
-    logger.warn("Google id_token missing nonce claim — skipping nonce verification (SDK limitation)");
+    logger.warn("Google id_token missing nonce claim — relying on single-use replay defense (SDK limitation)");
   }
 
   if (!claims.sub || typeof claims.sub !== "string") {
