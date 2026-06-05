@@ -448,7 +448,7 @@ mfaRouter.post("/login/verify", async (req: Request, res: Response) => {
       async () =>
         prisma.user.findUnique({
           where: { id: userIdToVerify },
-          select: { id: true, email: true, role: true },
+          select: { id: true, email: true, role: true, emailVerified: true },
         }),
       { reason: "auth:mfa-verify" },
     );
@@ -471,6 +471,7 @@ mfaRouter.post("/login/verify", async (req: Request, res: Response) => {
         uid: user.id,
         email: user.email,
         role: user.role,
+        emailVerified: user.emailVerified != null,
       },
     });
   } catch (err) {

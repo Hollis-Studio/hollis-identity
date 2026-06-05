@@ -32,6 +32,7 @@ import {
   generateAccessToken,
   issueRefreshToken,
 } from "./authService";
+import { getStore } from "./tokenDenylistService";
 
 // ============================================================================
 // Helpers
@@ -60,6 +61,7 @@ export const OAUTH_ERROR_CODE = {
   EMAIL_NOT_VERIFIED: "OAUTH_EMAIL_NOT_VERIFIED",
   ACCOUNT_INACTIVE: "OAUTH_ACCOUNT_INACTIVE",
   NO_ACCOUNT_FOUND: "OAUTH_NO_ACCOUNT_FOUND",
+  ACCOUNT_LINK_UNVERIFIED: "OAUTH_ACCOUNT_LINK_UNVERIFIED",
 } as const;
 
 export type OAuthErrorCode = (typeof OAUTH_ERROR_CODE)[keyof typeof OAUTH_ERROR_CODE];
@@ -105,6 +107,7 @@ export interface OAuthAuthSession {
     role: string;
     organizationId: string | null;
     isAnonymous: boolean;
+    emailVerified: boolean;
     onboardingCompleted: boolean;
   };
   user: {
@@ -171,7 +174,7 @@ function jwkToPem(jwk: {
 async function verifyAppleIdToken(
   idToken: string,
   rawNonce: string,
-): Promise<{ sub: string; email?: string; emailVerified?: boolean }> {
+): Promise<{ sub: string; email?: string; emailVerified?: boolean; exp: number }> {
   const env = getEnv();
   const audience = env.APPLE_SERVICE_ID ?? env.IOS_BUNDLE_ID;
 
@@ -207,19 +210,30 @@ async function verifyAppleIdToken(
     throw new OAuthError(OAUTH_ERROR_CODE.VERIFICATION_FAILED, `Apple id_token verification failed: ${(err as Error).message}`);
   }
 
-  const expectedNonceHash = crypto.createHash("sha256").update(rawNonce).digest("hex");
-  if (payload.nonce !== expectedNonceHash) {
-    throw new OAuthError(OAUTH_ERROR_CODE.NONCE_MISMATCH, "Apple id_token nonce mismatch — possible token replay attack");
+  // Verify the nonce only when the client supplied one. The Google Sign-In SDK API in
+  // use cannot attach a nonce, so the flow can't hard-require it; replay protection is
+  // instead enforced uniformly via the one-time-use id_token cache in
+  // verifyOAuthCredentials. When a nonce IS provided (Apple supports it natively), bind it.
+  if (rawNonce) {
+    const expectedNonceHash = crypto.createHash("sha256").update(rawNonce).digest("hex");
+    if (payload.nonce !== expectedNonceHash) {
+      throw new OAuthError(OAUTH_ERROR_CODE.NONCE_MISMATCH, "Apple id_token nonce mismatch — possible token replay attack");
+    }
   }
 
   if (!payload.sub) {
     throw new OAuthError(OAUTH_ERROR_CODE.MISSING_SUB, "Apple id_token missing sub claim");
   }
 
+  if (typeof payload.exp !== "number") {
+    throw new OAuthError(OAUTH_ERROR_CODE.VERIFICATION_FAILED, "Apple id_token missing exp claim");
+  }
+
   return {
     sub: payload.sub,
     email: typeof payload.email === "string" ? payload.email : undefined,
     emailVerified: payload.email_verified === true || payload.email_verified === "true",
+    exp: payload.exp,
   };
 }
 
@@ -234,7 +248,7 @@ const GOOGLE_ISSUER_2 = "accounts.google.com";
 async function verifyGoogleIdToken(
   idToken: string,
   rawNonce: string,
-): Promise<{ sub: string; email?: string; emailVerified?: boolean; name?: string }> {
+): Promise<{ sub: string; email?: string; emailVerified?: boolean; name?: string; exp: number }> {
   const env = getEnv();
   const expectedAudience = env.GOOGLE_CLIENT_ID;
 
@@ -283,6 +297,7 @@ async function verifyGoogleIdToken(
     email: typeof claims.email === "string" ? claims.email : undefined,
     emailVerified: claims.email_verified === "true" || claims.email_verified === true,
     name: typeof claims.name === "string" ? claims.name : undefined,
+    exp,
   };
 }
 
@@ -313,6 +328,7 @@ async function findOrLinkOAuthUser(
   organizationId: string | null;
   email: string | null;
   displayName: string;
+  emailVerified: boolean;
   isNewLink: boolean;
   isNewUser: boolean;
   mfaEnabled: boolean;
@@ -334,6 +350,7 @@ async function findOrLinkOAuthUser(
                 role: true,
                 organizationId: true,
                 email: true,
+                emailVerified: true,
                 isActive: true,
                 _count: {
                   select: { mfaCredentials: { where: { isVerified: true } } },
@@ -354,6 +371,7 @@ async function findOrLinkOAuthUser(
             organizationId: u.organizationId,
             email: u.email,
             displayName: resolveDisplayName(u.email),
+            emailVerified: u.emailVerified != null,
             isNewLink: false,
             isNewUser: false,
             mfaEnabled: u._count.mfaCredentials > 0,
@@ -377,6 +395,8 @@ async function findOrLinkOAuthUser(
               organizationId: true,
               email: true,
               isActive: true,
+              emailVerified: true,
+              passwordHash: true,
               _count: {
                 select: { mfaCredentials: { where: { isVerified: true } } },
               },
@@ -386,6 +406,24 @@ async function findOrLinkOAuthUser(
           if (existingUser) {
             if (!existingUser.isActive) {
               throw new OAuthError(OAUTH_ERROR_CODE.ACCOUNT_INACTIVE, "Account is inactive");
+            }
+
+            // SECURITY (account pre-hijacking): the provider has proven the caller owns
+            // this email, but that does NOT prove the *existing* local account is theirs.
+            // An attacker can pre-register a victim's email with a password they control;
+            // silently linking the victim's OAuth identity to that row would hand the
+            // attacker a shared account (they keep password login). Only auto-link when
+            // the existing account is trustworthy: it already verified the email (proving
+            // inbox ownership), OR it is OAuth-only (passwordHash === "" — no attacker-set
+            // password to retain). Otherwise refuse and let the user verify / use password.
+            const accountVerifiedEmail = existingUser.emailVerified != null;
+            const accountIsOAuthOnly = existingUser.passwordHash === "";
+            if (!accountVerifiedEmail && !accountIsOAuthOnly) {
+              throw new OAuthError(
+                OAUTH_ERROR_CODE.ACCOUNT_LINK_UNVERIFIED,
+                "An account with this email already exists but has not been verified. " +
+                  "Please sign in with your password, or verify your email, before linking a social sign-in.",
+              );
             }
 
             await tx.oAuthAccount.create({
@@ -402,6 +440,7 @@ async function findOrLinkOAuthUser(
               organizationId: existingUser.organizationId,
               email: existingUser.email,
               displayName: resolveDisplayName(existingUser.email),
+              emailVerified: existingUser.emailVerified != null,
               isNewLink: true,
               isNewUser: false,
               mfaEnabled: existingUser._count.mfaCredentials > 0,
@@ -442,6 +481,7 @@ async function findOrLinkOAuthUser(
             organizationId: newUser.organizationId,
             email: newUser.email,
             displayName: resolveDisplayName(newUser.email),
+            emailVerified: newUser.emailVerified != null,
             isNewLink: true,
             isNewUser: true,
             mfaEnabled: false,
@@ -471,6 +511,7 @@ async function issueSession(
   organizationId: string | null,
   email: string | null,
   displayName: string,
+  emailVerified: boolean,
   provider: OAuthProvider,
   mfaEnabled: boolean,
   isNewUser: boolean,
@@ -492,6 +533,7 @@ async function issueSession(
       role,
       organizationId,
       isAnonymous: false,
+      emailVerified,
       onboardingCompleted: false, // TODO(W6f): add onboardingCompleted to User model
     },
     user: { uid: userId, email, displayName, role },
@@ -508,15 +550,58 @@ async function issueSession(
 // Public API
 // ============================================================================
 
+/**
+ * SECURITY (id_token replay): enforce single-use per OAuth id_token. The Google SDK
+ * API in use cannot attach a nonce, so a captured-but-still-valid id_token could
+ * otherwise be replayed against POST /oauth within its ~1h validity to mint a session.
+ * We record an accept marker keyed by hash(provider, idToken) in the shared
+ * (Postgres-backed, cross-instance) denylist store, TTL'd to the token's own expiry,
+ * and reject any second presentation. Fail CLOSED on store errors.
+ */
+async function assertOAuthIdTokenUnused(
+  provider: OAuthProvider,
+  idToken: string,
+  expSeconds: number,
+): Promise<void> {
+  const key = `oauth_replay:${provider}:${crypto
+    .createHash("sha256")
+    .update(idToken)
+    .digest("hex")}`;
+  const store = getStore();
+
+  let alreadyUsed: boolean;
+  try {
+    alreadyUsed = await store.isTokenDenied(key);
+  } catch (err) {
+    logger.error({ err, provider }, "OAuth replay-cache lookup failed — rejecting (fail-closed)");
+    throw new OAuthError(OAUTH_ERROR_CODE.VERIFICATION_FAILED, "Unable to verify sign-in credential");
+  }
+
+  if (alreadyUsed) {
+    throw new OAuthError(
+      OAUTH_ERROR_CODE.NONCE_MISMATCH,
+      "OAuth id_token has already been used — possible replay attack",
+    );
+  }
+
+  // Persist the accept marker. Expire it when the token would naturally expire so the
+  // table self-prunes (cap the TTL defensively in case of a bogus far-future exp).
+  const maxTtlMs = 60 * 60 * 1000; // 1h — longer than any provider id_token lifetime
+  const expiresAt = new Date(Math.min(expSeconds * 1000, Date.now() + maxTtlMs));
+  await store.denyToken(key, expiresAt, "oauth_replay");
+}
+
 export async function verifyOAuthCredentials(
   input: OAuthVerificationInput,
 ): Promise<OAuthAuthSession> {
   const { provider, idToken, nonce } = input;
 
   let identity: OAuthIdentity;
+  let idTokenExp: number;
   try {
     if (provider === "apple") {
       const verified = await verifyAppleIdToken(idToken, nonce);
+      idTokenExp = verified.exp;
       identity = {
         sub: verified.sub,
         email: verified.email,
@@ -526,6 +611,7 @@ export async function verifyOAuthCredentials(
       };
     } else {
       const verified = await verifyGoogleIdToken(idToken, nonce);
+      idTokenExp = verified.exp;
       identity = {
         sub: verified.sub,
         email: verified.email,
@@ -538,8 +624,20 @@ export async function verifyOAuthCredentials(
     throw err;
   }
 
-  const { userId, userRole, organizationId, email, displayName, isNewLink, isNewUser, mfaEnabled } =
-    await findOrLinkOAuthUser(identity, provider);
+  // Reject replays before any account lookup / session issuance.
+  await assertOAuthIdTokenUnused(provider, idToken, idTokenExp);
+
+  const {
+    userId,
+    userRole,
+    organizationId,
+    email,
+    displayName,
+    emailVerified,
+    isNewLink,
+    isNewUser,
+    mfaEnabled,
+  } = await findOrLinkOAuthUser(identity, provider);
 
   logger.info({ provider, isNewLink, isNewUser, userId: userId.slice(0, 8) }, "OAuth sign-in successful");
 
@@ -555,7 +653,17 @@ export async function verifyOAuthCredentials(
     });
   }
 
-  return issueSession(userId, userRole, organizationId, email, displayName, provider, mfaEnabled, isNewUser);
+  return issueSession(
+    userId,
+    userRole,
+    organizationId,
+    email,
+    displayName,
+    emailVerified,
+    provider,
+    mfaEnabled,
+    isNewUser,
+  );
 }
 
 /**

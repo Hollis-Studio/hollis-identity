@@ -16,7 +16,6 @@ import { AUDIENCES, type Audience, type MfaLoginPendingResponse } from "@hollis-
 import { passwordSchema } from "@hollis-studio/contracts/password";
 import { Router, type Request, type Response } from "express";
 import crypto from "crypto";
-import jwt from "jsonwebtoken";
 import { z } from "zod";
 import { getPublicJwks, verifyJwt } from "../lib/jwtKeys";
 import { logger } from "../lib/logger";
@@ -27,7 +26,12 @@ import { authenticateToken } from "../middleware/auth";
 import * as authService from "../services/authService";
 import { AuthError } from "../services/authService";
 import { sendPasswordResetEmail } from "../services/emailService";
-import { sendVerificationEmail, confirmEmailVerification, EmailVerificationError } from "../services/emailVerificationService";
+import {
+  confirmEmailVerification,
+  EmailVerificationError,
+  getVerificationEmailCooldown,
+  sendVerificationEmail,
+} from "../services/emailVerificationService";
 import { writeAuditLog, extractIp } from "../services/authAuditService";
 import { checkAccountLockout } from "../lib/accountLockout";
 import { getMfaStatus } from "../services/mfaService";
@@ -39,6 +43,7 @@ import {
 import * as passwordResetService from "../services/passwordResetService";
 import { PasswordResetError } from "../services/passwordResetService";
 import { createPendingMfaSession } from "../services/pendingMfaSessionService";
+import { isAccessTokenDenied } from "../services/tokenDenylistService";
 import {
   sendBadRequest,
   sendConflict,
@@ -65,10 +70,18 @@ const registerBodySchema = z.object({
   password: z.string().min(6, "Password must be at least 6 characters").max(128, "Password must be at most 128 characters"),
   displayName: z.string().trim().min(1).max(128).optional(),
   role: z.enum(["ADMIN", "CLINICIAN", "TRAINER", "CLIENT"] as const).optional(),
+  sourceApp: z.string().trim().min(1).max(64).optional(),
 });
+
+const verificationSourceBodySchema = z.object({
+  sourceApp: z.string().trim().min(1).max(64).optional(),
+});
+
+const VERIFY_EMAIL_RESEND_COOLDOWN_MS = 60 * 1000;
 
 const logoutBodySchema = z.object({
   refreshToken: z.string().optional(),
+  accessToken: z.string().optional(),
 });
 
 const refreshBodySchema = z.object({
@@ -245,7 +258,7 @@ authRouter.post("/register", async (req: Request, res: Response) => {
     return;
   }
 
-  const { email, password, displayName, role = "CLIENT" } = parseResult.data;
+  const { email, password, displayName, role = "CLIENT", sourceApp } = parseResult.data;
 
   try {
     // Check if email already registered (SECURITY: use generic error to prevent enumeration)
@@ -280,6 +293,7 @@ authRouter.post("/register", async (req: Request, res: Response) => {
         role: newUser.role,
         organizationId: newUser.organizationId,
         isAnonymous: false,
+        emailVerified: false,
       },
       provider: "password",
       onboardingCompleted: false,
@@ -297,7 +311,7 @@ authRouter.post("/register", async (req: Request, res: Response) => {
     });
 
     // Send verification email (non-blocking — registration succeeds regardless)
-    sendVerificationEmail(newUser.id, newUser.email).catch((err: unknown) => {
+    sendVerificationEmail(newUser.id, newUser.email, sourceApp).catch((err: unknown) => {
       req.log?.warn({ err }, "Failed to send verification email after registration");
     });
 
@@ -336,9 +350,9 @@ authRouter.post("/logout", async (req: Request, res: Response) => {
   }
 
   try {
-    const refreshToken = parseResult.data.refreshToken;
+    const { refreshToken, accessToken } = parseResult.data;
 
-    await authService.logout(refreshToken);
+    await authService.logout(refreshToken, accessToken);
 
     writeAuditLog({
       actorId: req.user?.userId,
@@ -376,22 +390,40 @@ authRouter.post("/refresh", async (req: Request, res: Response) => {
       return;
     }
 
-    // MFA carry-forward: decode the previous access token to check for mfaVerifiedAt.
-    // This prevents clinical/admin users from being forced to re-complete MFA on every
-    // 15-min access token expiry while the MFA session window (8h) is still valid.
+    // MFA carry-forward: read mfaVerifiedAt from the previous access token so
+    // clinical/admin users aren't forced to re-complete MFA on every 15-min access
+    // token expiry while the 8h MFA session window is still valid.
+    //
+    // SECURITY: the previous access token is expired by definition (that's why we're
+    // refreshing), so we verify its SIGNATURE while ignoring expiry. Using jwt.decode
+    // (no signature check) would let any holder of a valid refresh token forge a
+    // {mfaVerifiedAt: now} payload and bypass MFA entirely. We also capture the token's
+    // owner so authService.refresh can reject a carry-forward value minted for a
+    // different account.
     let previousMfaVerifiedAt: number | undefined;
+    let previousAccessTokenUserId: string | undefined;
     if (parseResult.data.previousAccessToken) {
       try {
-        const decoded = jwt.decode(parseResult.data.previousAccessToken) as { mfaVerifiedAt?: number } | null;
-        if (decoded?.mfaVerifiedAt != null) {
+        const decoded = verifyJwt<{
+          userId?: string;
+          sub?: string;
+          type?: string;
+          mfaVerifiedAt?: number;
+        }>(parseResult.data.previousAccessToken, { ignoreExpiration: true });
+        if (decoded.type === authService.AUTH_TOKEN_TYPE.ACCESS && decoded.mfaVerifiedAt != null) {
           previousMfaVerifiedAt = decoded.mfaVerifiedAt;
+          previousAccessTokenUserId = decoded.userId ?? decoded.sub;
         }
       } catch {
-        // Ignore decode failures — MFA status simply won't carry forward
+        // Invalid signature / not an access token — silently skip MFA carry-forward.
       }
     }
 
-    const result = await authService.refresh(refreshToken, previousMfaVerifiedAt);
+    const result = await authService.refresh(
+      refreshToken,
+      previousMfaVerifiedAt,
+      previousAccessTokenUserId,
+    );
 
     writeAuditLog({
       actorId: result.profile.uid,
@@ -453,6 +485,25 @@ function verifyIdentityToken(token: string, audience?: Audience): Record<string,
   return verifyJwt<Record<string, unknown>>(token, verifyOptions);
 }
 
+/**
+ * SECURITY: a valid signature + unexpired token is NOT sufficient — a token revoked
+ * via logout / password reset / admin action must be rejected here too. Consumers
+ * (e.g. the Workouts server's auth-client) rely on /verify for revocation when they
+ * use the remote verification path. Fail CLOSED on denylist errors.
+ */
+async function isVerifiedTokenRevoked(claims: Record<string, unknown>): Promise<boolean> {
+  const jti = typeof claims.jti === "string" ? claims.jti : undefined;
+  const userId = typeof claims.userId === "string" ? claims.userId : undefined;
+  const iat = typeof claims.iat === "number" ? claims.iat : undefined;
+  if (!jti || !userId || iat == null) return false;
+  try {
+    return await isAccessTokenDenied(jti, userId, iat);
+  } catch (error) {
+    logger.error({ err: error, component: "auth/verify" }, "Denylist check failed on /verify — treating token as revoked");
+    return true;
+  }
+}
+
 export async function verifyTokenGetHandler(req: Request, res: Response): Promise<void> {
   // auth-public: verifies a Bearer token and returns AccessTokenClaims as JSON.
   // Used by @hollis-studio/auth-client's remote verify path when offline JWT verification
@@ -469,6 +520,11 @@ export async function verifyTokenGetHandler(req: Request, res: Response): Promis
   try {
     const audience = getVerifyAudience(typeof req.query.audience === "string" ? req.query.audience : undefined);
     const decoded = verifyIdentityToken(token, audience);
+
+    if (await isVerifiedTokenRevoked(decoded)) {
+      sendUnauthorized(res, "Token has been revoked");
+      return;
+    }
 
     // Return the raw decoded claims — audience validation is the consumer's responsibility
     res.json({ success: true, data: decoded });
@@ -487,6 +543,12 @@ export async function verifyTokenPostHandler(req: Request, res: Response): Promi
 
   try {
     const decoded = verifyIdentityToken(parseResult.data.token, parseResult.data.audience);
+
+    if (await isVerifiedTokenRevoked(decoded)) {
+      sendUnauthorized(res, "Token has been revoked");
+      return;
+    }
+
     res.json({ success: true, data: decoded, claims: decoded });
   } catch (error) {
     logger.debug({ err: error, component: "auth/verify" }, "Token verification failed");
@@ -519,6 +581,7 @@ authRouter.get("/me", authenticateToken, async (req: Request, res: Response) => 
         isActive: true,
         createdAt: true,
         updatedAt: true,
+        emailVerified: true,
       },
     });
 
@@ -532,6 +595,7 @@ authRouter.get("/me", authenticateToken, async (req: Request, res: Response) => 
       email: user.email,
       role: user.role,
       organizationId: user.organizationId,
+      emailVerified: user.emailVerified != null,
       createdAt: user.createdAt.toISOString(),
       updatedAt: user.updatedAt.toISOString(),
     });
@@ -592,6 +656,10 @@ authRouter.post("/oauth", async (req: Request, res: Response) => {
 
         case OAUTH_ERROR_CODE.ACCOUNT_INACTIVE:
           sendUnauthorized(res, "Account is inactive");
+          return;
+
+        case OAUTH_ERROR_CODE.ACCOUNT_LINK_UNVERIFIED:
+          sendConflict(res, error.message);
           return;
 
         case OAUTH_ERROR_CODE.NO_ACCOUNT_FOUND:
@@ -815,7 +883,7 @@ authRouter.post("/biometric-token", authenticateToken, async (req: Request, res:
       user.organizationId,
     );
 
-    // expiresAt mirrors REFRESH_TOKEN_EXPIRY_MS (7 days).
+    // expiresAt mirrors REFRESH_TOKEN_EXPIRY_MS (60 days).
     const expiresAt = new Date(Date.now() + authService.REFRESH_TOKEN_EXPIRY_MS).toISOString();
 
     res.json({ success: true, data: { refreshToken, expiresAt } });
@@ -832,6 +900,12 @@ authRouter.post("/biometric-token", authenticateToken, async (req: Request, res:
 // ============================================================================
 
 authRouter.post("/verify-email/send", authenticateToken, async (req: Request, res: Response) => {
+  const parseResult = verificationSourceBodySchema.safeParse(req.body ?? {});
+  if (!parseResult.success) {
+    sendBadRequest(res, parseResult.error.issues[0]?.message ?? "Invalid request body");
+    return;
+  }
+
   const userId = req.user?.userId;
   if (!userId) {
     sendUnauthorized(res, "Authentication required");
@@ -858,7 +932,20 @@ authRouter.post("/verify-email/send", authenticateToken, async (req: Request, re
       return;
     }
 
-    await sendVerificationEmail(userId, user.email);
+    const cooldown = await getVerificationEmailCooldown(
+      userId,
+      VERIFY_EMAIL_RESEND_COOLDOWN_MS,
+    );
+    if (cooldown) {
+      sendTooManyRequests(
+        res,
+        "Verification email recently sent. Please wait before requesting another link.",
+        cooldown.retryAfterSeconds,
+      );
+      return;
+    }
+
+    await sendVerificationEmail(userId, user.email, parseResult.data.sourceApp);
 
     writeAuditLog({
       actorId: userId,

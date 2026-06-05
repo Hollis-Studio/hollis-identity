@@ -29,17 +29,23 @@ function buildResetUrl(token: string): string {
   return url.toString();
 }
 
-function buildVerifyUrl(token: string): string {
+export type VerificationSourceApp = string;
+
+export function buildVerifyUrl(
+  token: string,
+  sourceApp?: VerificationSourceApp,
+): string {
   const env = getEnv();
   // Fall back to RESET_PASSWORD_URL base if VERIFY_EMAIL_URL not set
   const baseUrl = env.VERIFY_EMAIL_URL ?? env.RESET_PASSWORD_URL;
   if (!baseUrl) {
     throw new Error("VERIFY_EMAIL_URL is required to send email verification");
   }
-  const base = new URL(baseUrl);
-  // Use the verify-email path on the same origin
-  const url = new URL("/verify-email", base.origin);
+  const url = new URL(baseUrl);
   url.searchParams.set("token", token);
+  if (sourceApp) {
+    url.searchParams.set("app", sourceApp);
+  }
   return url.toString();
 }
 
@@ -92,9 +98,10 @@ export async function sendEmailVerificationEmail(params: {
   email: string;
   token: string;
   expiresAt: Date;
+  sourceApp?: VerificationSourceApp;
 }): Promise<void> {
   const env = getEnv();
-  const verifyUrl = buildVerifyUrl(params.token);
+  const verifyUrl = buildVerifyUrl(params.token, params.sourceApp);
 
   if (env.EMAIL_PROVIDER === "console") {
     logger.info(

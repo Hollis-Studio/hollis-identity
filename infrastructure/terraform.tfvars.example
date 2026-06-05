@@ -20,6 +20,7 @@ jwt_audiences  = "hollis-health,hollis-workouts"
 email_from     = "noreply@hollis.health"
 email_provider = "ses"
 reset_password_url = "https://hollis.health/reset-password"
+verify_email_url = "https://www.hollis.health/verify?type=email"
 
 # ECS sizing
 desired_count = 2

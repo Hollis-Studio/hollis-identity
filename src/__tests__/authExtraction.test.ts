@@ -177,6 +177,15 @@ describe("Identity HTTP auth boundary", () => {
         body: { email: "bad", password: "short" },
         status: 400,
       },
+      {
+        path: "/v1/auth/register",
+        body: {
+          email: "user@example.com",
+          password: "correct-password",
+          sourceApp: "",
+        },
+        status: 400,
+      },
       { path: "/v1/auth/refresh", body: {}, status: 401 },
       { path: "/v1/auth/logout", body: {}, status: 200 },
       {

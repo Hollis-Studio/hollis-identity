@@ -297,14 +297,13 @@ export function validateEnvOnStartup(): void {
   const errors: string[] = [];
 
   if (isProduction) {
-    // Both HS256 (shared-secret, Workouts flip-to-AWS model) and RS256 (asymmetric,
-    // future default) are allowed in production. Each algorithm requires its own
+    // Both HS256 (shared-secret) and RS256 (asymmetric) are allowed in
+    // production. Each algorithm requires its own
     // key material:
     //
     //   JWT_ALGORITHM=HS256 → requires JWT_SECRET >= 32 chars (NIST SP 800-131A
-    //     HMAC-SHA256 floor). This secret MUST be provisioned bit-for-bit identical
-    //     to the Workouts server's IDENTITY_JWT_SECRET env var so that
-    //     @hollis-studio/auth-client can verify tokens locally without a network hop.
+    //     HMAC-SHA256 floor). Workouts currently uses Identity's remote /verify
+    //     endpoint and does not require a matching consumer-side secret.
     //
     //   JWT_ALGORITHM=RS256 → requires JWT_PRIVATE_KEY (PEM) and JWT_KEY_ID.
     //     Preferred for future deployments; enables JWKS public-key distribution.
@@ -346,6 +345,9 @@ export function validateEnvOnStartup(): void {
     }
     if (validated.EMAIL_PROVIDER === "ses" && !validated.RESET_PASSWORD_URL) {
       errors.push("EMAIL_PROVIDER=ses but RESET_PASSWORD_URL is not set.");
+    }
+    if (validated.EMAIL_PROVIDER === "ses" && !validated.VERIFY_EMAIL_URL) {
+      errors.push("EMAIL_PROVIDER=ses but VERIFY_EMAIL_URL is not set.");
     }
     if (!validated.SENTRY_DSN) {
       warnings.push(

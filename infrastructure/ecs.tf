@@ -174,7 +174,7 @@ resource "aws_ecs_task_definition" "identity" {
       { name = "NODE_ENV", value = "production" },
       { name = "PORT", value = "4001" },
       { name = "AWS_REGION", value = var.aws_region },
-      # HS256 is required: Workouts verifies tokens with the shared JWT_SECRET.
+      # HS256 remains supported. Workouts currently verifies via remote /verify.
       # JWT_PRIVATE_KEY / JWT_PUBLIC_KEY remain in the app secret bundle as an
       # unused fallback in case RS256 is re-enabled in the future.
       { name = "JWT_ALGORITHM", value = "HS256" },
@@ -185,6 +185,7 @@ resource "aws_ecs_task_definition" "identity" {
       { name = "EMAIL_PROVIDER", value = var.email_provider },
       { name = "EMAIL_FROM", value = var.email_from },
       { name = "RESET_PASSWORD_URL", value = var.reset_password_url },
+      { name = "VERIFY_EMAIL_URL", value = var.verify_email_url },
       { name = "LOG_LEVEL", value = var.log_level },
     ]
 

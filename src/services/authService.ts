@@ -33,15 +33,44 @@ import { rehashIfNeeded, verifyPassword } from "../lib/passwordHashing";
 import { timingSafePasswordVerify } from "../lib/securityUtils";
 import { Prisma, prisma } from "../lib/prisma";
 import { runAsSystemOperation } from "../lib/tenantContext";
+import { denyAccessToken } from "./tokenDenylistService";
 
 // ============================================================================
 // Config
 // ============================================================================
 
 export const ACCESS_TOKEN_EXPIRY = "15m";
-export const REFRESH_TOKEN_EXPIRY = "7d";
-export const REFRESH_TOKEN_EXPIRY_MS = 7 * 24 * 60 * 60 * 1000;
+export const REFRESH_TOKEN_EXPIRY = "60d";
+export const REFRESH_TOKEN_EXPIRY_MS = 60 * 24 * 60 * 60 * 1000;
 export const ACCESS_TOKEN_EXPIRY_MS = 15 * 60 * 1000;
+
+/**
+ * Rotation grace window. A refresh token is single-use: rotating it marks it
+ * `usedAt` and mints a replacement. If the client never receives that
+ * replacement — a dropped response, the app backgrounded/killed mid-flight, or
+ * a client-side timeout-abort *after* the server already committed the rotation
+ * — it will retry with the same (now-used) token. Re-presenting a used token
+ * within this window is treated as that benign lost-response retry rather than
+ * theft, *provided* its replacement was never delivered (still unused and
+ * unrevoked). Outside the window, or when the replacement has already been
+ * used, it is genuine reuse and the whole token family is revoked.
+ *
+ * Because the access token lives only 15 minutes, an active client rotates its
+ * refresh token ~96×/day; on flaky mobile networks the lost-response race is
+ * common, so without this grace window users are signed out seemingly at
+ * random. 60s comfortably covers a client retry without meaningfully widening
+ * the theft-detection window.
+ */
+export const REFRESH_REUSE_GRACE_MS = 60 * 1000;
+
+/**
+ * `revokedReason` for the undelivered replacement we retire when forgiving a
+ * lost-response retry (see {@link REFRESH_REUSE_GRACE_MS}). Distinct from
+ * TOKEN_REUSE_DETECTED so audit logs separate benign retries from real theft.
+ * The column is free-form text; this is intentionally a local literal rather
+ * than a wire-level REVOKED_REASON.
+ */
+const GRACE_SUPERSEDE_REASON = "SUPERSEDED_BY_GRACE_RETRY";
 
 /**
  * JWT token purpose/type values used across auth flows.
@@ -80,6 +109,7 @@ export interface AuthResponse {
     role: string;
     organizationId: string | null;
     isAnonymous: boolean;
+    emailVerified: boolean;
   };
   provider: string;
   idToken: string;
@@ -422,6 +452,7 @@ export async function authenticatePasswordUser(
           role: user.role,
           organizationId: user.organizationId,
           isAnonymous: false,
+          emailVerified: user.emailVerified != null,
         },
         provider: "password",
         onboardingCompleted: false, // TODO(W6f): add onboardingCompleted to User model when app-specific fields are added
@@ -433,26 +464,70 @@ export async function authenticatePasswordUser(
 }
 
 /**
- * Logout — revokes the refresh token if provided.
+ * Logout — revokes the refresh token and (if supplied) immediately denies the
+ * session's access token so it stops working before its natural 15-min expiry.
  */
-export async function logout(refreshToken?: string): Promise<{ success: boolean }> {
+export async function logout(
+  refreshToken?: string,
+  accessToken?: string,
+): Promise<{ success: boolean }> {
   return runAsSystemOperation(
     async () => {
+      let sessionUserId: string | undefined;
+
       if (refreshToken) {
         try {
-          const tokenHash = crypto.createHash("sha256").update(refreshToken).digest("hex");
-
-          await prisma.refreshToken.update({
-            where: { tokenHash },
-            data: {
-              revokedAt: new Date(),
-              revokedReason: REVOKED_REASON.LOGOUT,
-            },
+          // SECURITY: verify the refresh token's signature before revoking. The endpoint
+          // is unauthenticated, so without this an attacker could attempt to revoke
+          // arbitrary sessions by submitting forged/guessed token strings. Revocation
+          // stays keyed by the token hash (caller must hold the real token); we only
+          // additionally require it to be a server-issued refresh token.
+          const decoded = verifyJwt<{ userId?: string; type?: string }>(refreshToken, {
+            ignoreExpiration: true,
           });
+          if (decoded.type === AUTH_TOKEN_TYPE.REFRESH) {
+            sessionUserId = decoded.userId;
+            const tokenHash = crypto.createHash("sha256").update(refreshToken).digest("hex");
+            await prisma.refreshToken.update({
+              where: { tokenHash },
+              data: {
+                revokedAt: new Date(),
+                revokedReason: REVOKED_REASON.LOGOUT,
+              },
+            });
+          }
         } catch (error) {
           logger.warn(
             { err: error, component: "authService" },
             "Failed to revoke token on logout",
+          );
+        }
+      }
+
+      // SECURITY (revocation propagation): deny the session's access token by jti so it
+      // is rejected immediately by every Identity route and by any consumer using the
+      // denylist-aware verify path — instead of remaining valid until natural expiry.
+      // Scoped to this token's jti so other devices/sessions stay signed in.
+      if (accessToken) {
+        try {
+          const decoded = verifyJwt<{
+            userId?: string;
+            type?: string;
+            jti?: string;
+            exp?: number;
+          }>(accessToken, { ignoreExpiration: true });
+          if (
+            decoded.type === AUTH_TOKEN_TYPE.ACCESS &&
+            decoded.jti &&
+            decoded.exp != null &&
+            (sessionUserId == null || decoded.userId === sessionUserId)
+          ) {
+            await denyAccessToken(decoded.jti, new Date(decoded.exp * 1000), "logout");
+          }
+        } catch (error) {
+          logger.warn(
+            { err: error, component: "authService" },
+            "Failed to deny access token on logout",
           );
         }
       }
@@ -474,6 +549,7 @@ export async function logout(refreshToken?: string): Promise<{ success: boolean 
 export async function refresh(
   refreshToken: string,
   previousMfaVerifiedAt?: number,
+  previousAccessTokenUserId?: string,
 ): Promise<AuthResponse> {
   return runAsSystemOperation(
     async () => {
@@ -520,27 +596,59 @@ export async function refresh(
           throw new AuthError("Refresh token has expired", "TOKEN_EXPIRED");
         }
 
-        // REUSE DETECTION
+        // REUSE DETECTION (with a lost-response grace window — see REFRESH_REUSE_GRACE_MS)
+        let graceSupersede: { id: string; generation: number } | null = null;
         if (storedToken.usedAt) {
-          logger.error(
+          const usedAgeMs = Date.now() - storedToken.usedAt.getTime();
+          const successor = storedToken.replacedByTokenHash
+            ? await prisma.refreshToken.findUnique({
+                where: { tokenHash: storedToken.replacedByTokenHash },
+              })
+            : null;
+          // The replacement reaching the client is proven only once it is itself
+          // used (or revoked). A still-pristine successor means the client never
+          // got it — consistent with a dropped response, not theft.
+          const successorDelivered =
+            successor != null && (successor.usedAt != null || successor.revokedAt != null);
+          const isLostResponseRetry =
+            usedAgeMs <= REFRESH_REUSE_GRACE_MS && successor != null && !successorDelivered;
+
+          if (!isLostResponseRetry) {
+            logger.error(
+              {
+                userId: decoded.userId,
+                familyId: storedToken.familyId,
+                generation: storedToken.generation,
+                component: "authService",
+              },
+              "[SECURITY] TOKEN REUSE DETECTED - Revoking entire token family (possible token theft)",
+            );
+
+            await prisma.refreshToken.updateMany({
+              where: { familyId: storedToken.familyId, revokedAt: null },
+              data: { revokedAt: new Date(), revokedReason: REVOKED_REASON.TOKEN_REUSE_DETECTED },
+            });
+
+            throw new AuthError(
+              "Token reuse detected - session revoked for security",
+              "TOKEN_REUSE_DETECTED",
+            );
+          }
+
+          logger.warn(
             {
               userId: decoded.userId,
               familyId: storedToken.familyId,
               generation: storedToken.generation,
+              usedAgeMs,
               component: "authService",
             },
-            "[SECURITY] TOKEN REUSE DETECTED - Revoking entire token family (possible token theft)",
+            "[AUTH] Lost-response refresh retry within grace window — reissuing instead of revoking",
           );
-
-          await prisma.refreshToken.updateMany({
-            where: { familyId: storedToken.familyId, revokedAt: null },
-            data: { revokedAt: new Date(), revokedReason: REVOKED_REASON.TOKEN_REUSE_DETECTED },
-          });
-
-          throw new AuthError(
-            "Token reuse detected - session revoked for security",
-            "TOKEN_REUSE_DETECTED",
-          );
+          // Retire the undelivered replacement and re-rotate off this token so the
+          // family stays a single linear chain (no fork). The transaction below
+          // branches on this and re-verifies the successor is still undelivered.
+          graceSupersede = { id: successor.id, generation: successor.generation };
         }
 
         const user = await prisma.user.findUnique({
@@ -552,6 +660,7 @@ export async function refresh(
             email: true,
             displayName: true,
             role: true,
+            emailVerified: true,
             _count: {
               select: { mfaCredentials: { where: { isVerified: true } } },
             },
@@ -572,11 +681,21 @@ export async function refresh(
           throw new AuthError("Account deactivated", "ACCOUNT_DEACTIVATED");
         }
 
-        // MFA carry-forward
+        // MFA carry-forward. SECURITY: only honor a carried mfaVerifiedAt when the
+        // previous access token (signature already verified by the route) belonged to
+        // the SAME user as this refresh token. Without this binding, a holder of any
+        // valid refresh token could pair it with a forged/borrowed token's mfaVerifiedAt
+        // and bypass MFA.
         let carryMfaVerifiedAt: number | undefined;
         if (previousMfaVerifiedAt != null) {
+          const ownerMatches = previousAccessTokenUserId === decoded.userId;
           const mfaAge = Date.now() - previousMfaVerifiedAt;
-          if (mfaAge <= MFA_SESSION_WINDOW_MS) {
+          if (!ownerMatches) {
+            logger.warn(
+              { userId: decoded.userId, component: "authService" },
+              "[SECURITY] previousAccessToken owner mismatch on refresh — not carrying MFA forward",
+            );
+          } else if (mfaAge <= MFA_SESSION_WINDOW_MS) {
             carryMfaVerifiedAt = previousMfaVerifiedAt;
           } else {
             logger.info(
@@ -615,18 +734,22 @@ export async function refresh(
 
         const newTokenHash = crypto.createHash("sha256").update(newRefreshToken).digest("hex");
         const refreshExpiresAt = new Date(Date.now() + REFRESH_TOKEN_EXPIRY_MS);
+        // Grace reissues chain off the retired replacement so generation stays monotonic.
+        const newGeneration = (graceSupersede?.generation ?? storedToken.generation) + 1;
 
         await prisma.$transaction(
           async (tx) => {
-            const consumeResult = await tx.refreshToken.updateMany({
-              where: { id: storedToken.id, usedAt: null, revokedAt: null },
-              data: { usedAt: new Date(), replacedByTokenHash: newTokenHash },
-            });
-
-            if (consumeResult.count !== 1) {
-              const latest = await tx.refreshToken.findUnique({ where: { id: storedToken.id } });
-
-              if (latest?.usedAt) {
+            if (graceSupersede) {
+              // Lost-response retry: retire the undelivered replacement instead of
+              // consuming `storedToken` (already used). Re-verify it is still
+              // pristine inside the transaction — if it was used/revoked between
+              // the pre-check and here, the replacement WAS delivered after all,
+              // so this is genuine reuse: revoke the family.
+              const supersede = await tx.refreshToken.updateMany({
+                where: { id: graceSupersede.id, usedAt: null, revokedAt: null },
+                data: { revokedAt: new Date(), revokedReason: GRACE_SUPERSEDE_REASON },
+              });
+              if (supersede.count !== 1) {
                 await tx.refreshToken.updateMany({
                   where: { familyId: storedToken.familyId, revokedAt: null },
                   data: { revokedAt: new Date(), revokedReason: REVOKED_REASON.TOKEN_REUSE_DETECTED },
@@ -636,12 +759,38 @@ export async function refresh(
                   "TOKEN_REUSE_DETECTED",
                 );
               }
+              // Repoint the already-used token at the new replacement so a further
+              // retry within the grace window resolves against this fresh successor.
+              await tx.refreshToken.update({
+                where: { id: storedToken.id },
+                data: { replacedByTokenHash: newTokenHash },
+              });
+            } else {
+              const consumeResult = await tx.refreshToken.updateMany({
+                where: { id: storedToken.id, usedAt: null, revokedAt: null },
+                data: { usedAt: new Date(), replacedByTokenHash: newTokenHash },
+              });
 
-              if (latest?.revokedAt) {
-                throw new AuthError("Refresh token has been revoked", "TOKEN_REVOKED");
+              if (consumeResult.count !== 1) {
+                const latest = await tx.refreshToken.findUnique({ where: { id: storedToken.id } });
+
+                if (latest?.usedAt) {
+                  await tx.refreshToken.updateMany({
+                    where: { familyId: storedToken.familyId, revokedAt: null },
+                    data: { revokedAt: new Date(), revokedReason: REVOKED_REASON.TOKEN_REUSE_DETECTED },
+                  });
+                  throw new AuthError(
+                    "Token reuse detected - session revoked for security",
+                    "TOKEN_REUSE_DETECTED",
+                  );
+                }
+
+                if (latest?.revokedAt) {
+                  throw new AuthError("Refresh token has been revoked", "TOKEN_REVOKED");
+                }
+
+                throw new AuthError("Invalid refresh token", "TOKEN_NOT_FOUND");
               }
-
-              throw new AuthError("Invalid refresh token", "TOKEN_NOT_FOUND");
             }
 
             await tx.refreshToken.create({
@@ -649,7 +798,7 @@ export async function refresh(
                 userId: user.id,
                 tokenHash: newTokenHash,
                 familyId: storedToken.familyId,
-                generation: storedToken.generation + 1,
+                generation: newGeneration,
                 expiresAt: refreshExpiresAt,
               },
             });
@@ -662,7 +811,8 @@ export async function refresh(
             userId: user.id,
             familyId: storedToken.familyId,
             oldGeneration: storedToken.generation,
-            newGeneration: storedToken.generation + 1,
+            newGeneration,
+            graceReissue: graceSupersede != null,
             component: "authService",
           },
           "[AUTH] Refresh token rotated successfully",
@@ -679,6 +829,7 @@ export async function refresh(
             role: user.role,
             organizationId: user.organizationId,
             isAnonymous: false,
+            emailVerified: user.emailVerified != null,
           },
           provider: "password",
           idToken,

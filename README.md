@@ -22,14 +22,14 @@ Key responsibilities:
 
 ## Current build status
 
-**Local Identity hardening is complete enough for staging deployment prep — `npm run typecheck`, `npm run build`, `npm test`, and Terraform validation are green. The service is not deployed and no production cutover has happened.**
+**Identity is deployed for the active Workouts runtime and remains in hardening.** Local checks (`npm run typecheck`, `npm run build`, `npm test`) cover the current codebase, but remaining production-hardening work still includes broader DB-backed route coverage, JWKS/auth-client hardening, SES/DNS evidence, and a formal security review.
 
-**Shared package state (2026-05-18):** this repo consumes `@hollis-studio/contracts@0.2.0-alpha.7` from GitHub Packages. The previous sibling `file:../hollis-shared` install path has been removed from manifests, Docker, and lockfiles.
+**Shared package state:** this repo consumes `@hollis-studio/contracts@0.2.0-alpha.19` from GitHub Packages. The previous sibling `file:../hollis-shared` install path has been removed from manifests, Docker, and lockfiles.
 
 - W6b: Repo scaffolding
 - W6c: Verbatim copy of auth services and lib files from hollis-health-app
 - **W6d (done):** Refactored all lifted files — removed Health coupling, created stubs for missing libs, `typecheck` exits 0
-- **W6f (local hardening done):** Auth/MFA routes are wired, app startup mounts CORS, request context, rate limiters, and error handling; Identity returns tokens in JSON only; `POST /verify` matches `@hollis-studio/auth-client`; production access/refresh/MFA-pending token signing uses RS256/JWKS; production token revocation state is PostgreSQL-backed; account lockout storage has a PostgreSQL implementation but login enforcement still needs to be wired; password reset email can send via SES; Terraform IaC validates and plans AWS resources.
+- **W6f (local hardening done):** Auth/MFA routes are wired, app startup mounts CORS, request context, rate limiters, and error handling; Identity returns tokens in JSON only; `POST /verify` matches `@hollis-studio/auth-client`; token revocation state is PostgreSQL-backed; account lockout enforcement is wired into login; password reset email can send via SES; Terraform IaC validates and plans AWS resources.
 - W6g (pending): Health app cutover to Identity Service tokens.
 - W6h (pending): Live AWS deployment, migrations, DNS/ACM/SES verification, full DB-backed route matrix, auth-client hardening, consumer app integration.
 
@@ -61,33 +61,28 @@ Key responsibilities:
 - `/.well-known/jwks.json` publishes the RS256 public key in production. HS256 mode returns an empty key set (no public key to distribute).
 - Production Postgres TLS verifies certificates by default; set `DATABASE_SSL_CA` when the runtime trust store does not already include the RDS CA.
 
-### JWT signing mode — HS256 shared-secret (current Workouts flip-to-AWS model)
+### JWT verification mode for Workouts
 
-Both `JWT_ALGORITHM=HS256` and `JWT_ALGORITHM=RS256` are supported in production. HS256 is the active mode for the Hollis Workouts integration.
+Both `JWT_ALGORITHM=HS256` and `JWT_ALGORITHM=RS256` are supported. The active Hollis Workouts server integration uses `@hollis-studio/auth-client` without `jwksSecret`, so every authenticated Workouts API request delegates to Identity's remote `POST /verify` endpoint. This is denylist-aware and rejects tokens revoked by logout, password reset, or admin invalidation immediately.
 
-**Secret pairing (critical):**
+The former Workouts local-verification path used a shared HS256 secret:
 
 | Service | Env var | Value |
 |---|---|---|
 | Identity Service | `JWT_SECRET` | shared HMAC-SHA256 secret |
-| Hollis Workouts server | `IDENTITY_JWT_SECRET` | **identical value** |
+| Hollis Workouts server | `IDENTITY_JWT_SECRET` | legacy only unless Workouts deliberately re-enables `createAuthClient({ jwksSecret })` |
 
-The Workouts server calls `createAuthClient({ jwksSecret: process.env.IDENTITY_JWT_SECRET })`. The auth-client pins to HS256 and verifies tokens locally without a network call. Both env vars MUST be provisioned with the exact same value.
-
-Generate a suitable secret:
+If local HS256 verification is re-enabled, generate a suitable secret and provision the exact same value to both services:
 ```sh
 openssl rand -base64 48
 ```
 
-RS256 (asymmetric JWKS) remains supported for future deployments. To switch, set `JWT_ALGORITHM=RS256` with `JWT_PRIVATE_KEY` (PEM) and `JWT_KEY_ID`.
+RS256 (asymmetric JWKS) remains supported. To switch signing mode, set `JWT_ALGORITHM=RS256` with `JWT_PRIVATE_KEY` (PEM) and `JWT_KEY_ID`; consumers still need auth-client JWKS fetch/cache hardening before relying on local RS256 verification.
 
-### Remaining before production cutover
+### Remaining hardening work
 
-- Apply reviewed Terraform to a staging/prod environment.
-- Create and review the initial Prisma migration; no `prisma/migrations/` directory is committed yet. Run `prisma migrate deploy` against the Identity RDS database after the migration exists.
-- Push the container image to ECR and verify ECS health checks.
-- Configure Route53/ACM for `identity.hollis.health`.
-- Verify SES sender/domain and password reset delivery.
+- Keep Terraform, migrations, ECS health checks, and DNS/ACM evidence current for every environment.
+- Verify SES sender/domain and password reset delivery evidence.
 - Expand route tests from smoke/boundary coverage to a full DB-backed auth matrix.
 - Harden `@hollis-studio/auth-client` for JWKS fetch/cache, `getMe`, revocation/session decisions, and consumer cookie helpers.
 - Implement Health `USE_IDENTITY_SERVICE` delegation, soak, and rollback path.
@@ -147,13 +142,13 @@ All routes are prefixed `/v1/auth` unless noted.
 
 **Refresh tokens** are 7-day JWTs, DB-backed (hash stored in `RefreshToken` table) with family-rotation and reuse detection. Reuse of a spent token revokes the entire token family.
 
-**Signing:** RS256 in production (`JWT_PRIVATE_KEY` + `JWT_KEY_ID`); HS256 locally (`JWT_SECRET`). JWKS is served at `/.well-known/jwks.json` (empty key set in HS256 mode). Production verification uses the public key derived from `JWT_PRIVATE_KEY` unless `JWT_PUBLIC_KEY` is explicitly set.
+**Signing:** HS256 and RS256 are both supported. JWKS is served at `/.well-known/jwks.json` (empty key set in HS256 mode). RS256 verification uses the public key derived from `JWT_PRIVATE_KEY` unless `JWT_PUBLIC_KEY` is explicitly set.
 
 **Revocation:** Individual access token JTIs are denylisted in the `AccessTokenDenylistEntry` table. A user-level watermark (`UserTokenDenylistEntry`) is written on password reset/change to invalidate all active access tokens for that user without enumerating them. Refresh tokens are revoked in the `RefreshToken` table.
 
 **MFA-pending tokens** (`type: mfa_pending`, 15-minute TTL) are issued by `/login` when MFA is enrolled; single-use enforcement is backed by the `PendingMfaSession` table.
 
-**Account lockout:** The `AccountLockoutEntry` Prisma model (emails and IPs hashed) is implemented and ready, but login-path enforcement is not yet wired. <!-- UNVERIFIED: lockout check call site in authenticatePasswordUser — confirm wired before production cutover -->
+**Account lockout:** The login path checks `AccountLockoutEntry` state before user lookup and records failed attempts for both existing and non-existing emails.
 
 ---
 
@@ -211,7 +206,7 @@ set +a
 | `EMAIL_PROVIDER`     | no | `console` (default) or `ses` for AWS SES.                                                   |
 | `EMAIL_FROM`         | no | Verified sender address (default `noreply@hollis.health`).                                  |
 | `RESET_PASSWORD_URL` | prod (SES) | Frontend reset-password page URL for link construction (not the Identity API URL).      |
-| `VERIFY_EMAIL_URL`   | no | Frontend email-verification page URL. Falls back to `RESET_PASSWORD_URL` base if unset.     |
+| `VERIFY_EMAIL_URL`   | prod (SES) | Frontend suite email-verification page URL. Example: `https://www.hollis.health/verify?type=email`. |
 | `AWS_REGION`         | prod (SES) | AWS region for SES when `EMAIL_PROVIDER=ses`.                                           |
 
 **OAuth (social sign-in):**

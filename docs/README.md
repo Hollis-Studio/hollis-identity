@@ -5,7 +5,7 @@ Standalone authentication and identity service for the Hollis suite. Handles use
 **Stack:** Express 5 · Prisma 7 (adapter-pg) · PostgreSQL 16 · Node 20 · ECS Fargate · TypeScript (ESM)
 
 **Package:** `@hollis-studio/identity@0.1.0-alpha.2`  
-**Shared contracts:** `@hollis-studio/contracts@0.2.0-alpha.7` from GitHub Packages
+**Shared contracts:** `@hollis-studio/contracts@0.2.0-alpha.19` from GitHub Packages
 
 ---
 
@@ -36,7 +36,7 @@ Remaining before cutover:
 5. SIGTERM / SIGINT graceful shutdown handler registered
 ```
 
-Production-mode hard failures at startup: `JWT_ALGORITHM` must be `RS256`, `JWT_PRIVATE_KEY` and `JWT_KEY_ID` are required, `EMAIL_PROVIDER=ses` requires `AWS_REGION` and `RESET_PASSWORD_URL`.
+Production-mode hard failures at startup: `JWT_ALGORITHM` must be `RS256`, `JWT_PRIVATE_KEY` and `JWT_KEY_ID` are required, `EMAIL_PROVIDER=ses` requires `AWS_REGION`, `RESET_PASSWORD_URL`, and `VERIFY_EMAIL_URL`.
 
 Graceful shutdown drains in-flight requests (15-second timeout), then disconnects the Prisma pool.
 
@@ -288,7 +288,7 @@ set -a && source .env && set +a
 | `EMAIL_PROVIDER` | No | `console` (dev) or `ses` (prod, default `console`) |
 | `EMAIL_FROM` | No | Verified sender address (default `noreply@hollis.health`) |
 | `RESET_PASSWORD_URL` | Prod/SES | Frontend reset-password page URL (not the Identity API URL) |
-| `VERIFY_EMAIL_URL` | No | Frontend email verification page URL |
+| `VERIFY_EMAIL_URL` | Prod/SES | Frontend suite email verification page URL |
 | `AWS_REGION` | Prod/SES | AWS region for SES |
 | `REDIS_URL` | No | Enables Redis-backed rate limiting |
 | `ACCESS_TOKEN_DENYLIST_ENABLED` | No | Set to `false` to skip denylist checks (default `true`) |

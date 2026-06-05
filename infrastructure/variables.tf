@@ -96,6 +96,12 @@ variable "reset_password_url" {
   default     = "https://hollis.health/reset-password"
 }
 
+variable "verify_email_url" {
+  description = "Suite email verification page URL used in email verification emails."
+  type        = string
+  default     = "https://www.hollis.health/verify?type=email"
+}
+
 variable "cors_origins" {
   description = "Comma-separated allowed browser origins."
   type        = string

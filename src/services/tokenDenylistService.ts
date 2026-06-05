@@ -73,7 +73,8 @@ export type RevocationReason =
   | "account_deactivated" // Account was deactivated
   | "security_incident" // Suspicious activity detected
   | "admin_action" // Admin forced logout
-  | "token_reuse"; // Refresh token reuse detected
+  | "token_reuse" // Refresh token reuse detected
+  | "oauth_replay"; // OAuth id_token presented more than once (single-use marker)
 
 /**
  * Entry in the denylist cache.
