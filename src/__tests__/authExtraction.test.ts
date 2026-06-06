@@ -5,8 +5,12 @@ import crypto from "node:crypto";
 import jwt from "jsonwebtoken";
 import { AccessTokenClaimsSchema, AUDIENCES } from "@hollis-studio/contracts";
 import {
-  generateAccessTokenWithJti,
+  ACCESS_TOKEN_EXPIRY,
+  ACCESS_TOKEN_EXPIRY_MS,
   AUTH_TOKEN_TYPE,
+  generateAccessTokenWithJti,
+  REFRESH_TOKEN_EXPIRY,
+  REFRESH_TOKEN_EXPIRY_MS,
 } from "../services/authService";
 import {
   recordLoginFailure,
@@ -51,6 +55,13 @@ function generateTestRsaKeyPair(): { privateKey: string; publicKey: string } {
 describe("Identity extraction invariants", () => {
   before(() => {
     configureEnv();
+  });
+
+  it("uses consumer-app token lifetimes", () => {
+    assert.equal(ACCESS_TOKEN_EXPIRY, "90d");
+    assert.equal(ACCESS_TOKEN_EXPIRY_MS, 90 * 24 * 60 * 60 * 1000);
+    assert.equal(REFRESH_TOKEN_EXPIRY, "365d");
+    assert.equal(REFRESH_TOKEN_EXPIRY_MS, 365 * 24 * 60 * 60 * 1000);
   });
 
   it("emits shared-schema-compatible access token claims", () => {

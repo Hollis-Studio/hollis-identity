@@ -391,8 +391,8 @@ authRouter.post("/refresh", async (req: Request, res: Response) => {
     }
 
     // MFA carry-forward: read mfaVerifiedAt from the previous access token so
-    // clinical/admin users aren't forced to re-complete MFA on every 15-min access
-    // token expiry while the 8h MFA session window is still valid.
+    // clinical/admin users aren't forced to re-complete MFA when a long-lived
+    // access token eventually refreshes while the 8h MFA session window is still valid.
     //
     // SECURITY: the previous access token is expired by definition (that's why we're
     // refreshing), so we verify its SIGNATURE while ignoring expiry. Using jwt.decode
@@ -455,10 +455,6 @@ authRouter.post("/refresh", async (req: Request, res: Response) => {
     });
 
   if (error instanceof AuthError) {
-      if (error.code === "TOKEN_REUSE_DETECTED") {
-        sendUnauthorized(res, "Session revoked due to token reuse - please log in again");
-        return;
-      }
       if (error.code === "TOKEN_REVOKED") {
         sendUnauthorized(res, "Session has been revoked - please log in again");
         return;
@@ -883,7 +879,7 @@ authRouter.post("/biometric-token", authenticateToken, async (req: Request, res:
       user.organizationId,
     );
 
-    // expiresAt mirrors REFRESH_TOKEN_EXPIRY_MS (60 days).
+    // expiresAt mirrors REFRESH_TOKEN_EXPIRY_MS.
     const expiresAt = new Date(Date.now() + authService.REFRESH_TOKEN_EXPIRY_MS).toISOString();
 
     res.json({ success: true, data: { refreshToken, expiresAt } });

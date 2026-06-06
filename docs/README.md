@@ -76,7 +76,7 @@ All auth routes are mounted at `/v1/auth`. The MFA router is mounted at `/v1/aut
 | `POST` | `/v1/auth/login` | Email+password login; returns token envelope or MFA-pending session |
 | `POST` | `/v1/auth/register` | New user registration; issues tokens immediately |
 | `POST` | `/v1/auth/logout` | Revokes refresh token |
-| `POST` | `/v1/auth/refresh` | Refresh token rotation; accepts optional `previousAccessToken` for MFA carry-forward |
+| `POST` | `/v1/auth/refresh` | Stable refresh token validation; accepts optional `previousAccessToken` for MFA carry-forward |
 | `GET` | `/v1/auth/verify` | Token verification via `Authorization: Bearer` header |
 | `POST` | `/v1/auth/verify` | Token verification via JSON body `{ token, audience? }` |
 | `POST` | `/v1/auth/oauth` | Apple/Google OAuth sign-in (id_token verification) |
@@ -112,8 +112,8 @@ WebAuthn routes (`/v1/auth/mfa/webauthn/*`) are not yet implemented — tracked 
 
 | Type | `type` claim | TTL | Stored in DB |
 |---|---|---|---|
-| Access | `access` | 15 minutes | No (stateless) |
-| Refresh | `refresh` | 7 days | Yes (hash) |
+| Access | `access` | 90 days | No (stateless) |
+| Refresh | `refresh` | 365 days | Yes (hash) |
 | MFA-pending | `mfa_pending` | 15 minutes | Yes (`PendingMfaSession`) |
 
 ### Access token claims
@@ -129,14 +129,14 @@ The `claims.hollisHealth` namespace preserves backward compatibility during Heal
 
 Centralized in `src/lib/jwtKeys.ts` (`signJwt`, `verifyJwt`, `getPublicJwks`).
 
-### Refresh token rotation
+### Stable refresh tokens
 
 On refresh (`POST /v1/auth/refresh`):
 
 1. Verify JWT signature and `type=refresh`.
 2. Look up hash in `RefreshToken` table.
-3. **Reuse detection:** if `usedAt` is already set, revoke the entire token family and throw `TOKEN_REUSE_DETECTED`.
-4. Consume old token (set `usedAt`), create new token in the same family with `generation + 1` — done atomically at `SERIALIZABLE` isolation.
+3. Reject only if the token is revoked, expired, missing, or the user is inactive.
+4. Issue a fresh long-lived access token and return the same refresh token unchanged.
 5. MFA carry-forward: if `previousAccessToken` is supplied and `mfaVerifiedAt` is within the 8-hour session window, the claim propagates to the new access token.
 
 ### Token revocation / denylist
@@ -148,7 +148,7 @@ On refresh (`POST /v1/auth/refresh`):
 
 **Backend selection:** `DatabaseTokenDenylistStore` (PostgreSQL) in production; `InMemoryTokenDenylistStore` in dev/test. The DB store uses `AccessTokenDenylistEntry` and `UserTokenDenylistEntry` tables so revocation decisions are shared across all ECS tasks and survive deploys.
 
-Denylist checking is controlled by `ACCESS_TOKEN_DENYLIST_ENABLED` (default `true`). Disabling it falls back to the 15-minute TTL as the security boundary.
+Denylist checking is controlled by `ACCESS_TOKEN_DENYLIST_ENABLED` (default `true`). Disabling it falls back to the access-token TTL as the security boundary.
 
 ---
 
@@ -159,7 +159,7 @@ All models live in the `public` schema. Key tables:
 | Table | Purpose |
 |---|---|
 | `User` | Core identity: email, passwordHash, role (ADMIN/CLINICIAN/TRAINER/CLIENT), isActive, emailVerified, optional organizationId |
-| `RefreshToken` | Family-rotation refresh tokens: tokenHash (SHA-256), familyId, generation, usedAt, replacedByTokenHash, revokedAt |
+| `RefreshToken` | Stable refresh tokens: tokenHash (SHA-256), familyId/generation retained for compatibility, revokedAt |
 | `MfaCredential` | TOTP and WebAuthn credentials; totpSecret encrypted at rest |
 | `MfaEvent` | Audit trail for all MFA actions |
 | `PendingMfaSession` | Single-use MFA-pending session tokens (15-minute TTL) |
@@ -255,7 +255,7 @@ Storage is PostgreSQL-backed in production (`AccountLockoutEntry`); in-memory in
 - **Anti-enumeration:** `POST /v1/auth/forgot-password` always returns `200 { ok: true }`. Failed login and registration errors use generic messages. Timing-safe password comparison prevents user existence oracle.
 - **Password hashing:** bcrypt with configurable cost factor (`BCRYPT_COST_FACTOR`, default 13, range 10–16) plus optional server-side pepper (`PASSWORD_PEPPER`). On-login rehash upgrades cost factor automatically.
 - **TOTP secret encryption:** MFA TOTP secrets are encrypted at rest using `ENCRYPTION_KEY`.
-- **Refresh token reuse detection:** Any reuse of an already-consumed token triggers family-wide revocation.
+- **Explicit session revocation:** Logout, password reset, and password change revoke stored refresh-token records; ordinary refresh does not rotate tokens.
 - **Postgres TLS:** Production verifies certificates by default (`sslmode=require`). Supply `DATABASE_SSL_CA` when the runtime trust store needs an explicit RDS CA bundle.
 - **WAF:** AWS WAF rate-based rule (default 1000 req/5 min per IP) applied to the ALB via Terraform.
 

@@ -114,8 +114,7 @@ export const authenticateToken = (
         } catch (denylistError) {
           // SECURITY: fail CLOSED. If we cannot determine whether a token was revoked
           // (e.g. transient denylist DB outage), reject rather than admit a potentially
-          // revoked token onto sensitive routes (/change-password, /me, MFA). The 15-min
-          // access-token TTL keeps the degradation window for legitimate users small.
+          // revoked token onto sensitive routes (/change-password, /me, MFA).
           logger.error(
             { err: denylistError, userId: userPayload.userId, component: "auth" },
             "[SECURITY] Token denylist check failed - denying request (fail-closed)",

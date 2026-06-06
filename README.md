@@ -12,7 +12,7 @@ The Identity Service is the single source of truth for user identities across th
 
 Key responsibilities:
 
-- Issue access tokens (JWT, short-lived) and refresh tokens (family-rotation)
+- Issue long-lived access tokens (JWT) and stable DB-backed refresh tokens
 - Enforce MFA (TOTP now; WebAuthn is a tracked follow-up)
 - Manage password reset flows
 - Manage OAuth account links (Apple, Google)
@@ -63,16 +63,16 @@ Key responsibilities:
 
 ### JWT verification mode for Workouts
 
-Both `JWT_ALGORITHM=HS256` and `JWT_ALGORITHM=RS256` are supported. The active Hollis Workouts server integration uses `@hollis-studio/auth-client` without `jwksSecret`, so every authenticated Workouts API request delegates to Identity's remote `POST /verify` endpoint. This is denylist-aware and rejects tokens revoked by logout, password reset, or admin invalidation immediately.
+Both `JWT_ALGORITHM=HS256` and `JWT_ALGORITHM=RS256` are supported. The active Hollis Workouts server integration prefers local verification through `@hollis-studio/auth-client` when `IDENTITY_JWT_SECRET` is configured, so Workouts API requests do not depend on a live Identity `/verify` round trip. This intentionally trades immediate revocation propagation for a simpler, more reliable consumer-app session model.
 
-The former Workouts local-verification path used a shared HS256 secret:
+The Workouts local-verification path uses a shared HS256 secret:
 
 | Service | Env var | Value |
 |---|---|---|
 | Identity Service | `JWT_SECRET` | shared HMAC-SHA256 secret |
-| Hollis Workouts server | `IDENTITY_JWT_SECRET` | legacy only unless Workouts deliberately re-enables `createAuthClient({ jwksSecret })` |
+| Hollis Workouts server | `IDENTITY_JWT_SECRET` | same value as Identity `JWT_SECRET` |
 
-If local HS256 verification is re-enabled, generate a suitable secret and provision the exact same value to both services:
+Generate a suitable secret and provision the exact same value to both services:
 ```sh
 openssl rand -base64 48
 ```
@@ -100,7 +100,7 @@ All routes are prefixed `/v1/auth` unless noted.
 | `POST` | `/login` | public | Password login. Returns token pair or MFA-pending session when MFA is enrolled. |
 | `POST` | `/register` | public | Create account (Workouts / greenfield). Issues token pair immediately; queues verification email. |
 | `POST` | `/logout` | public | Revokes the refresh token in DB. Body: `{ refreshToken? }`. |
-| `POST` | `/refresh` | public | Rotates refresh token (family-rotation, reuse detection). Body: `{ refreshToken, previousAccessToken? }`. |
+| `POST` | `/refresh` | public | Validates a stable refresh token and returns a fresh access token plus the same refresh token. Body: `{ refreshToken, previousAccessToken? }`. |
 | `GET`  | `/verify` | public | Verifies Bearer token; returns decoded claims. Used by `@hollis-studio/auth-client` remote path. |
 | `POST` | `/verify` | public | Same as GET verify but token in body `{ token, audience? }`. Also mirrored at root `POST /verify`. |
 | `GET`  | `/me` | bearer | Returns authenticated user profile from DB. |
@@ -108,7 +108,7 @@ All routes are prefixed `/v1/auth` unless noted.
 | `POST` | `/forgot-password` | public | Initiates password reset; always returns `{ ok: true }` (anti-enumeration). |
 | `POST` | `/reset-password` | public | Consumes one-time token, sets new password, revokes all refresh tokens. |
 | `POST` | `/change-password` | bearer | Authenticated password change; revokes other sessions, keeps current one. |
-| `POST` | `/biometric-token` | bearer | Issues a long-TTL (7d) refresh token for mobile SecureStore biometric login. |
+| `POST` | `/biometric-token` | bearer | Issues a long-TTL refresh token for mobile SecureStore biometric login. |
 | `POST` | `/verify-email/send` | bearer | Sends or resends email verification link. |
 | `GET`  | `/verify-email/confirm` | public | Consumes single-use token from email link (`?token=…`); marks `emailVerified`. |
 
@@ -138,9 +138,9 @@ All routes are prefixed `/v1/auth` unless noted.
 
 ## Token strategy
 
-**Access tokens** are short-lived JWTs (15 minutes). Standard claims: `sub`, `iss`, `aud`, `exp`, `iat`, `jti`, `userId`, `role`, `organizationId`, `type` (`access`), `mfaEnabled`, `mfaVerifiedAt` (when MFA was verified). A `claims.hollisHealth.{ role, organizationId }` namespace is included for Health backward compatibility.
+**Access tokens** are long-lived JWTs (90 days). Standard claims: `sub`, `iss`, `aud`, `exp`, `iat`, `jti`, `userId`, `role`, `organizationId`, `type` (`access`), `mfaEnabled`, `mfaVerifiedAt` (when MFA was verified). A `claims.hollisHealth.{ role, organizationId }` namespace is included for Health backward compatibility.
 
-**Refresh tokens** are 7-day JWTs, DB-backed (hash stored in `RefreshToken` table) with family-rotation and reuse detection. Reuse of a spent token revokes the entire token family.
+**Refresh tokens** are 365-day JWTs, DB-backed (hash stored in `RefreshToken` table), and stable across ordinary refresh. `/refresh` validates the existing token and returns it unchanged with a fresh access token.
 
 **Signing:** HS256 and RS256 are both supported. JWKS is served at `/.well-known/jwks.json` (empty key set in HS256 mode). RS256 verification uses the public key derived from `JWT_PRIVATE_KEY` unless `JWT_PUBLIC_KEY` is explicitly set.
 
