@@ -120,6 +120,12 @@ variable "google_client_id" {
   default     = "669071559387-51r0f2ksiediq3rmlqpegnsvddjpndte.apps.googleusercontent.com"
 }
 
+variable "apple_service_id" {
+  description = "Expected `aud` claim when verifying Apple id_tokens. For native iOS Sign in with Apple this is the app's bundle identifier. Public value (not a secret). Apple sign-in fails closed without it (PROVIDER_NOT_CONFIGURED → 503)."
+  type        = string
+  default     = "com.hollishealth.workouts"
+}
+
 variable "email_from" {
   description = "Verified SES sender address."
   type        = string
