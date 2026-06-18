@@ -228,6 +228,22 @@ describe("Identity HTTP auth boundary", () => {
     assert.equal(response.status, 401);
     assert.equal(response.headers.has("set-cookie"), false);
   });
+
+  it("requires a bearer token for account deletion", async () => {
+    const response = await fetch(`${baseUrl}/v1/auth/account`, { method: "DELETE" });
+    assert.equal(response.status, 401);
+    assert.equal(response.headers.has("set-cookie"), false);
+  });
+
+  it("requires a bearer token for the onboarding reset", async () => {
+    const response = await fetch(`${baseUrl}/v1/auth/onboarding/reset`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    assert.equal(response.status, 401);
+    assert.equal(response.headers.has("set-cookie"), false);
+  });
 });
 
 // ============================================================================

@@ -128,6 +128,9 @@ model User {
   // Auth audit log entries
   authAuditLogs AuthAuditLog[]
 
+  // Cross-device "Reset Onboarding" epoch (0..1 per user)
+  onboardingReset UserOnboardingReset?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -425,6 +428,31 @@ model AuthAuditLog {
   @@index([actorId, createdAt])
   @@index([eventType, success])
   @@index([createdAt])
+}
+
+/// Cross-device "Reset Onboarding" epoch.
+///
+/// A row exists only after the user has requested an onboarding reset at least
+/// once; `resetAt` is the timestamp of the most recent reset. Clients compare it
+/// against the last reset epoch they have locally consumed: a server `resetAt`
+/// newer than the locally-consumed epoch means this device — including a freshly
+/// reinstalled one whose local consumed marker is gone — should re-run onboarding
+/// once, then record the epoch as consumed. The row is NEVER auto-cleared on read,
+/// so every device and reinstall catches the reset independently. A subsequent
+/// reset just bumps `resetAt` forward, re-triggering all devices.
+///
+/// This is the server-authoritative companion to the client-local `forceReOnboard`
+/// MMKV flag, which still handles the immediate, offline-capable local reset.
+model UserOnboardingReset {
+  /// The user this reset epoch belongs to (1:1).
+  userId    String   @id
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  /// Timestamp of the most recent onboarding reset request.
+  resetAt   DateTime
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
 
 /// Links an OAuth provider identity (sub) to an existing Hollis user.

@@ -43,7 +43,7 @@ import {
 import * as passwordResetService from "../services/passwordResetService";
 import { PasswordResetError } from "../services/passwordResetService";
 import { createPendingMfaSession } from "../services/pendingMfaSessionService";
-import { isAccessTokenDenied } from "../services/tokenDenylistService";
+import { denyAllUserAccessTokens, isAccessTokenDenied } from "../services/tokenDenylistService";
 import {
   sendBadRequest,
   sendConflict,
@@ -586,18 +586,140 @@ authRouter.get("/me", authenticateToken, async (req: Request, res: Response) => 
       return;
     }
 
+    // Cross-device onboarding-reset epoch. Read defensively so a profile load can
+    // never fail on it: if the UserOnboardingReset table is not yet migrated (or
+    // any read error occurs) we degrade to null ("no reset pending"), which is the
+    // pre-feature behavior. Clients compare this against their locally-consumed
+    // epoch to decide whether to re-run onboarding once.
+    const onboardingResetAt = await readOnboardingResetAt(userId);
+
     sendSuccess(res, {
       userId: user.id,
       email: user.email,
       role: user.role,
       organizationId: user.organizationId,
       emailVerified: user.emailVerified != null,
+      onboardingResetAt,
       createdAt: user.createdAt.toISOString(),
       updatedAt: user.updatedAt.toISOString(),
     });
   } catch (error) {
     req.log?.error({ err: error }, "Failed to load identity profile");
     sendError(res, "Failed to load identity profile", 500, undefined, "PROFILE_LOAD_ERROR");
+  }
+});
+
+/**
+ * Reads the user's cross-device onboarding-reset epoch as an ISO string, or null
+ * when no reset is pending. Wrapped so a missing/unmigrated table or any read
+ * error degrades to null rather than failing the caller (deploy-safe: the new
+ * server image can ship before the UserOnboardingReset migration is applied).
+ */
+async function readOnboardingResetAt(userId: string): Promise<string | null> {
+  try {
+    const row = await prisma.userOnboardingReset.findUnique({
+      where: { userId },
+      select: { resetAt: true },
+    });
+    return row ? row.resetAt.toISOString() : null;
+  } catch (error) {
+    logger.debug(
+      { err: error, component: "auth/onboarding-reset" },
+      "Onboarding-reset read failed (treating as no reset pending)",
+    );
+    return null;
+  }
+}
+
+// ============================================================================
+// POST /onboarding/reset  — cross-device "Reset Onboarding"
+// Authenticated. Bumps the user's reset epoch to now so every other device
+// (and a reinstalled one) re-runs onboarding once on its next /me restore.
+// auth-protected: requires valid access token
+// ============================================================================
+
+authRouter.post("/onboarding/reset", authenticateToken, async (req: Request, res: Response) => {
+  const userId = req.user?.userId;
+  if (!userId) {
+    sendUnauthorized(res, "Authentication required");
+    return;
+  }
+
+  try {
+    const resetAt = new Date();
+    await prisma.userOnboardingReset.upsert({
+      where: { userId },
+      update: { resetAt },
+      create: { userId, resetAt },
+    });
+
+    res.json({ success: true, data: { onboardingResetAt: resetAt.toISOString() } });
+  } catch (error) {
+    req.log?.error({ err: error }, "Failed to record onboarding reset");
+    sendError(res, "Failed to record onboarding reset", 500, undefined, "ONBOARDING_RESET_ERROR");
+  }
+});
+
+// ============================================================================
+// DELETE /account  — GDPR account erasure
+// Authenticated. Permanently deletes the Identity user record and all auth-layer
+// data (refresh tokens, MFA credentials/events, OAuth links, reset/verification
+// tokens). After this the email / social identity is free to register anew.
+// Workouts-domain data is erased separately by the Workouts server (the client
+// calls DELETE /v1/users/me before this). Idempotent: a second call for an
+// already-deleted account still returns success.
+// auth-protected: requires valid access token
+// ============================================================================
+
+authRouter.delete("/account", authenticateToken, async (req: Request, res: Response) => {
+  const userId = req.user?.userId;
+  if (!userId) {
+    sendUnauthorized(res, "Authentication required");
+    return;
+  }
+
+  try {
+    // Deny the user's outstanding access tokens immediately so a leaked token
+    // cannot keep acting on behalf of the now-deleted account. Refresh tokens are
+    // removed by the cascade below, so the session can no longer be renewed.
+    await denyAllUserAccessTokens(userId, "account_deactivated").catch((error: unknown) => {
+      req.log?.warn({ err: error }, "Failed to deny tokens during account deletion (proceeding)");
+    });
+
+    await runAsSystemOperation(
+      async () => {
+        // MfaEvent has onDelete: Restrict, so it must be removed before the user.
+        // Every other relation is onDelete: Cascade (or SetNull for AuthAuditLog).
+        await prisma.$transaction([
+          prisma.mfaEvent.deleteMany({ where: { userId } }),
+          prisma.user.delete({ where: { id: userId } }),
+        ]);
+      },
+      { reason: "auth:delete-account", userId },
+    );
+
+    writeAuditLog({
+      // actorId intentionally omitted: the user row is gone, and AuthAuditLog
+      // sets actorId to null on delete anyway. The event is still recorded.
+      eventType: "LOGOUT",
+      success: true,
+      ipAddress: extractIp(req),
+      userAgent: req.headers["user-agent"],
+      metadata: { action: "ACCOUNT_DELETED" },
+    });
+
+    logger.info({ component: "auth/delete-account" }, "Identity account deleted");
+    res.json({ success: true, data: { ok: true } });
+  } catch (error) {
+    // Prisma P2025 = record not found: the account is already gone. Treat delete
+    // as idempotent and report success so the client's local wipe still proceeds.
+    const prismaError = error as { code?: string };
+    if (prismaError.code === "P2025") {
+      res.json({ success: true, data: { ok: true } });
+      return;
+    }
+    req.log?.error({ err: error }, "Account deletion failed");
+    sendError(res, "Account deletion failed", 500, undefined, "ACCOUNT_DELETE_ERROR");
   }
 });
 
