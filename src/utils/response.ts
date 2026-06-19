@@ -65,8 +65,12 @@ export function sendBadRequest(res: Response, message: string, details?: string)
   sendError(res, message, 400, details, "BAD_REQUEST");
 }
 
-export function sendUnauthorized(res: Response, message = "Unauthorized"): void {
-  sendError(res, message, 401, undefined, "UNAUTHORIZED");
+export function sendUnauthorized(
+  res: Response,
+  message = "Unauthorized",
+  code = "UNAUTHORIZED",
+): void {
+  sendError(res, message, 401, undefined, code);
 }
 
 export function sendForbidden(res: Response, message = "Forbidden", code = "FORBIDDEN"): void {

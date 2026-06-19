@@ -949,7 +949,7 @@ authRouter.post("/change-password", authenticateToken, async (req: Request, res:
 
         if (error instanceof PasswordResetError) {
           if (error.code === "INVALID_PASSWORD") {
-            sendUnauthorized(res, "Current password is incorrect");
+            sendUnauthorized(res, "Current password is incorrect", "INVALID_CURRENT_PASSWORD");
           } else if (error.code === "USER_NOT_FOUND") {
             sendUnauthorized(res, "User not found");
           } else {
