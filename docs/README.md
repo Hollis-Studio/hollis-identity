@@ -52,7 +52,7 @@ Applied in order by `createApp()` in `src/index.ts`:
 | `cors` | Allows origins from `CORS_ORIGINS` (empty = block all in prod, allow all in dev) |
 | `express.json` | Body parsing; 1 MB limit |
 | `loginRateLimiter` | 5 req/min per IP on `POST /v1/auth/login` and `POST /v1/auth/register` |
-| `loginEmailRateLimiter` | 10 req/15 min per email address on `POST /v1/auth/login` |
+| `loginEmailRateLimiter` | 50 req/15 min per email address on `POST /v1/auth/login` |
 | `authSessionRateLimiter` | 15 req/min per IP on all `GET|POST /v1/auth/*` |
 | `authenticateToken` | Bearer JWT verification + denylist check (used on protected routes only) |
 | `errorHandler` | Central error handler — handles `AppError`, Prisma errors, payload-too-large, JSON parse errors |

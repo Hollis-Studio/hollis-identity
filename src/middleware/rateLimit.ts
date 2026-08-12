@@ -186,12 +186,15 @@ export const loginRateLimiter = rateLimit({
   store: createRateLimitStore("login"),
 });
 
+export const LOGIN_EMAIL_RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
+export const LOGIN_EMAIL_RATE_LIMIT_MAX = 50;
+
 /**
  * Per-email rate limiter for login endpoints.
  * Limits login attempts per email address to prevent credential-stuffing attacks
  * from distributed botnets that rotate IPs.
  *
- * - 10 requests per 15 minutes per email
+ * - 50 requests per 15 minutes per email
  * - Applied alongside loginRateLimiter (IP-based) for defense-in-depth
  * - Uses req.body.email as the key; falls back to IP if email not provided
  *
@@ -199,8 +202,8 @@ export const loginRateLimiter = rateLimit({
  * which the IP-based loginRateLimiter would miss.
  */
 export const loginEmailRateLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: () => effectiveMax(10), // 10 attempts per email per 15 min (100 in dev/test)
+  windowMs: LOGIN_EMAIL_RATE_LIMIT_WINDOW_MS,
+  max: () => effectiveMax(LOGIN_EMAIL_RATE_LIMIT_MAX), // 500 in dev/test
   keyGenerator: (req) => {
     // Extract email from request body for per-account limiting
     const email = (req.body as { email?: string } | undefined)?.email;
