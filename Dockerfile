@@ -44,5 +44,7 @@ COPY package.json ./
 
 EXPOSE 4001
 
-# esbuild emits a single bundled ESM file at dist/index.js.
-CMD ["node", "dist/index.js"]
+# Apply committed migrations before accepting traffic. Prisma serializes
+# concurrent migrate-deploy invocations, so a rolling ECS deployment with two
+# tasks remains safe and the schema is authoritative before app startup.
+CMD ["sh", "-c", "npx prisma migrate deploy && exec node dist/index.js"]

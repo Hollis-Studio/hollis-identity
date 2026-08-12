@@ -19,49 +19,32 @@ export interface RateLimitStoreHealth {
 }
 
 const stores = new Set<PostgresRateLimitStore>();
-let tableReady: Promise<void> | null = null;
 
-async function ensureRateLimitTable(): Promise<void> {
-  tableReady ??= prismaUnsafe
-    .$executeRawUnsafe(
-      `
-    CREATE TABLE IF NOT EXISTS "RateLimitCounter" (
-      "key" TEXT PRIMARY KEY,
-      "totalHits" INTEGER NOT NULL,
-      "resetTime" TIMESTAMPTZ NOT NULL
-    )
-  `,
-    )
-    .then(() => undefined)
-    .catch((error: unknown) => {
-      tableReady = null;
-      throw error;
-    });
-  return tableReady;
-}
+type RateLimitDatabase = Pick<typeof prismaUnsafe, "$executeRaw" | "$queryRaw">;
 
 export class PostgresRateLimitStore implements Store {
   readonly localKeys = false;
   readonly prefix: string;
   private windowMs = 60_000;
 
-  constructor(prefix: string) {
+  constructor(
+    prefix: string,
+    private readonly database: RateLimitDatabase = prismaUnsafe,
+  ) {
     this.prefix = `${prefix}:`;
     stores.add(this);
   }
 
   init(options: RateLimitOptions): void {
     this.windowMs = options.windowMs;
-    void ensureRateLimitTable();
   }
 
   async increment(key: string): Promise<IncrementResponse> {
-    await ensureRateLimitTable();
     const namespacedKey = `${this.prefix}${key}`;
-    await prismaUnsafe.$executeRaw`
+    await this.database.$executeRaw`
       DELETE FROM "RateLimitCounter" WHERE "resetTime" <= NOW()
     `;
-    const rows = await prismaUnsafe.$queryRaw<
+    const rows = await this.database.$queryRaw<
       Array<{ totalHits: number; resetTime: Date }>
     >`
       INSERT INTO "RateLimitCounter" ("key", "totalHits", "resetTime")
@@ -84,8 +67,7 @@ export class PostgresRateLimitStore implements Store {
   }
 
   async decrement(key: string): Promise<void> {
-    await ensureRateLimitTable();
-    await prismaUnsafe.$executeRaw`
+    await this.database.$executeRaw`
       UPDATE "RateLimitCounter"
       SET "totalHits" = GREATEST("totalHits" - 1, 0)
       WHERE "key" = ${`${this.prefix}${key}`}
@@ -93,15 +75,13 @@ export class PostgresRateLimitStore implements Store {
   }
 
   async resetKey(key: string): Promise<void> {
-    await ensureRateLimitTable();
-    await prismaUnsafe.$executeRaw`
+    await this.database.$executeRaw`
       DELETE FROM "RateLimitCounter" WHERE "key" = ${`${this.prefix}${key}`}
     `;
   }
 
   async resetAll(): Promise<void> {
-    await ensureRateLimitTable();
-    await prismaUnsafe.$executeRaw`
+    await this.database.$executeRaw`
       DELETE FROM "RateLimitCounter" WHERE "key" LIKE ${`${this.prefix}%`}
     `;
   }
@@ -109,7 +89,6 @@ export class PostgresRateLimitStore implements Store {
 
 export async function getRateLimitStoresHealth(): Promise<RateLimitStoreHealth> {
   try {
-    await ensureRateLimitTable();
     await prismaUnsafe.$queryRaw`SELECT 1 FROM "RateLimitCounter" LIMIT 1`;
     return { status: "healthy", type: "postgres" };
   } catch {
