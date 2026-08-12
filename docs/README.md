@@ -57,7 +57,7 @@ Applied in order by `createApp()` in `src/index.ts`:
 | `authenticateToken` | Bearer JWT verification + denylist check (used on protected routes only) |
 | `errorHandler` | Central error handler — handles `AppError`, Prisma errors, payload-too-large, JSON parse errors |
 
-Rate limiters use `MemoryStore` (single-instance). In dev/test, limits are multiplied by 10 to avoid interference. E2E security tests can force real limits via `E2E_SECURITY_TEST=true`. `REDIS_URL` enables Redis-backed rate limiting automatically (via `rateLimitStore.ts` abstraction).
+Production rate limiters use shared Postgres counters, so limits apply across every ECS task and during rolling deployments. Dev/test uses `MemoryStore`; limits are multiplied by 10 unless `E2E_SECURITY_TEST=true`. The limiter fails closed when its shared store is unavailable.
 
 ---
 
@@ -290,7 +290,7 @@ set -a && source .env && set +a
 | `RESET_PASSWORD_URL` | Prod/SES | Frontend reset-password page URL (not the Identity API URL) |
 | `VERIFY_EMAIL_URL` | Prod/SES | Frontend suite email verification page URL |
 | `AWS_REGION` | Prod/SES | AWS region for SES |
-| `REDIS_URL` | No | Enables Redis-backed rate limiting |
+| `REDIS_URL` | No | Deprecated; production rate limiting uses the existing Postgres database |
 | `ACCESS_TOKEN_DENYLIST_ENABLED` | No | Set to `false` to skip denylist checks (default `true`) |
 | `SENTRY_DSN` | No | Sentry project DSN (warn emitted in prod if absent) |
 | `BCRYPT_COST_FACTOR` | No | bcrypt work factor 10–16 (default `13`) |

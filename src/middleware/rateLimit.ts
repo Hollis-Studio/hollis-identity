@@ -2,22 +2,12 @@
  * @ai-context Rate limiting middleware | consumed by: app.ts, routes/auth.ts
  *
  * Provides rate limiting for auth-sensitive routes to prevent brute-force attacks.
- * Uses in-memory store for single-instance deployments.
+ * Uses a shared Postgres store in production and memory stores in dev/test.
  *
- * ## Architecture & Instance Mode
+ * ## Architecture
  *
- * This rate limiter is designed for **single-instance deployments** (see `SINGLE_INSTANCE_MODE`).
- * The in-memory store is appropriate for this mode and is the recommended configuration.
- *
- * - **Single-instance**: In-memory store provides effective per-IP rate limiting.
- * - **Cross-instance enforcement**: Out of scope for application-level rate limiting.
- *
- * ## Algorithm: Sliding Window
- *
- * Uses a sliding window algorithm rather than fixed windows:
- * - Tracks individual request timestamps within the window period
- * - Provides smoother rate limiting without "burst at window boundaries" issues
- * - Old timestamps are automatically pruned to prevent memory growth
+ * Production uses atomic Postgres upserts so every ECS task participates in
+ * one fixed-window counter. Dev/test retains isolated in-memory counters.
  *
  * ## Defense in Depth
  *
@@ -26,7 +16,6 @@
  * For production abuse protection at scale, use edge-level enforcement via AWS WAF Rate-Based Rules:
  * - Apply rate limiting at the edge (CloudFront/ALB) before requests reach the application
  * - Handles distributed attacks across multiple IPs more effectively
- * - No application-level state sharing needed across instances
  * - Better protection against DDoS and application-layer attacks
  *
  * @see {@link ../lib/instanceModeConfig.ts} for instance mode validation
@@ -38,43 +27,37 @@
  */
 
 import rateLimit, {
-    ipKeyGenerator,
-    MemoryStore,
-    type Options as RateLimitOptions,
+  ipKeyGenerator,
+  MemoryStore,
+  type Options as RateLimitOptions,
 } from "express-rate-limit";
 import { env } from "../lib/env";
 import { logger } from "../lib/logger";
 import {
-    clearStoreInstances,
-    closeAllRateLimitStores,
-    getRateLimitStoresHealth,
-    resetAllRateLimitStores,
-    type RateLimitStoreHealth,
+  clearStoreInstances,
+  closeAllRateLimitStores,
+  getRateLimitStoresHealth,
+  PostgresRateLimitStore,
+  resetAllRateLimitStores,
+  type RateLimitStoreHealth,
 } from "../lib/rateLimitStore";
 import { sendTooManyRequests } from "../utils/response";
 
 // Re-export for convenience
 export {
-    clearStoreInstances,
-    closeAllRateLimitStores,
-    getRateLimitStoresHealth,
-    resetAllRateLimitStores
+  clearStoreInstances,
+  closeAllRateLimitStores,
+  getRateLimitStoresHealth,
+  resetAllRateLimitStores,
 };
 export type { RateLimitStoreHealth };
 
 /**
- * Current rate limit store type. 'redis' when REDIS_URL is set, 'memory' otherwise.
+ * Current rate limit store type.
  * Exported for health check reporting.
- *
- * AUDIT-02 #2 (accepted): MemoryStore is correct for single-instance (<20 clients).
- * Redis-backed rate limiting is automatically enabled when REDIS_URL is set.
  */
-export const RATE_LIMIT_STORE = env.REDIS_URL
-  ? ("redis" as const)
-  : ("memory" as const);
-
-// Redis-backed rate limiting is automatically enabled when REDIS_URL is set.
-// Falls back to MemoryStore when Redis is unavailable (see RATE_LIMIT_REDIS_FALLBACK).
+export const RATE_LIMIT_STORE =
+  env.NODE_ENV === "production" ? ("postgres" as const) : ("memory" as const);
 
 // Skip rate limiting in test and development environments (evaluated dynamically to allow test overrides)
 const isTestEnv = () => env.NODE_ENV === "test";
@@ -127,7 +110,10 @@ const memoryStores: MemoryStore[] = [];
  * Each rate limiter needs its own store instance (express-rate-limit requirement).
  * @param _prefix - Reserved for future use (e.g., Redis key prefixing)
  */
-function createRateLimitStore(_prefix: string): MemoryStore {
+function createRateLimitStore(
+  prefix: string,
+): MemoryStore | PostgresRateLimitStore {
+  if (env.NODE_ENV === "production") return new PostgresRateLimitStore(prefix);
   const store = new MemoryStore();
   memoryStores.push(store);
   return store;
