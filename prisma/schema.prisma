@@ -20,6 +20,14 @@ datasource db {
   provider = "postgresql"
 }
 
+model RateLimitCounter {
+  key       String   @id
+  totalHits Int
+  resetTime DateTime
+
+  @@index([resetTime])
+}
+
 // ============================================================================
 // Enums
 // ============================================================================
