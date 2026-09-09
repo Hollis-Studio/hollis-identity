@@ -213,9 +213,10 @@ set +a
 
 | Variable            | Required | Description                                                                          |
 | ------------------- | -------- | ------------------------------------------------------------------------------------ |
-| `APPLE_SERVICE_ID`  | no | Apple Service ID for Sign in with Apple. Omit to disable Apple OAuth.            |
+| `APPLE_SERVICE_ID`  | no | Native Apple Sign in with Apple audience (the app bundle identifier). Omit with the other Apple audience values to disable Apple OAuth. |
+| `APPLE_WEB_SERVICE_ID` | no | Optional Apple web Service ID accepted alongside the native audience. Set only after Apple Developer configures the actual Service ID and return URL. |
 | `APPLE_TEAM_ID`     | no | Apple Team ID, used alongside `APPLE_SERVICE_ID`.                                |
-| `IOS_BUNDLE_ID`     | no | iOS bundle ID accepted as Apple audience in addition to `APPLE_SERVICE_ID`.      |
+| `IOS_BUNDLE_ID`     | no | Legacy iOS bundle ID accepted as Apple audience in addition to the configured native and web values. |
 | `GOOGLE_CLIENT_ID`  | no | Google OAuth client ID for Sign in with Google. Omit to disable Google OAuth.    |
 
 **Rate limiting:**

@@ -171,17 +171,32 @@ function jwkToPem(jwk: {
   return key.export({ type: "spki", format: "pem" }) as string;
 }
 
+export function getAppleAudiences(
+  config: Pick<ReturnType<typeof getEnv>, "APPLE_SERVICE_ID" | "APPLE_WEB_SERVICE_ID" | "IOS_BUNDLE_ID">,
+): [string, ...string[]] | undefined {
+  const audiences = [
+    config.APPLE_SERVICE_ID,
+    config.APPLE_WEB_SERVICE_ID,
+    config.IOS_BUNDLE_ID,
+  ].filter((audience): audience is string => Boolean(audience?.trim()));
+
+  const uniqueAudiences = [...new Set(audiences)];
+  return uniqueAudiences.length > 0
+    ? uniqueAudiences as [string, ...string[]]
+    : undefined;
+}
+
 async function verifyAppleIdToken(
   idToken: string,
   rawNonce: string,
 ): Promise<{ sub: string; email?: string; emailVerified?: boolean; exp: number }> {
   const env = getEnv();
-  const audience = env.APPLE_SERVICE_ID ?? env.IOS_BUNDLE_ID;
+  const audience = getAppleAudiences(env);
 
   if (!audience) {
     throw new OAuthError(
       OAUTH_ERROR_CODE.PROVIDER_NOT_CONFIGURED,
-      "Apple OAuth not configured: APPLE_SERVICE_ID or IOS_BUNDLE_ID must be set",
+      "Apple OAuth not configured: APPLE_SERVICE_ID, APPLE_WEB_SERVICE_ID, or IOS_BUNDLE_ID must be set",
     );
   }
 

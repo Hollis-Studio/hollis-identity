@@ -103,9 +103,9 @@ variable "verify_email_url" {
 }
 
 variable "cors_origins" {
-  description = "Comma-separated allowed browser origins."
+  description = "Comma-separated allowed first-party browser origins. Include both the apex and www public-site hosts while either may serve the suite web UI."
   type        = string
-  default     = "https://hollis.health,https://admin.hollis.health"
+  default     = "https://hollis.health,https://www.hollis.health,https://admin.hollis.health"
 }
 
 variable "jwt_audiences" {
@@ -121,9 +121,15 @@ variable "google_client_id" {
 }
 
 variable "apple_service_id" {
-  description = "Expected `aud` claim when verifying Apple id_tokens. For native iOS Sign in with Apple this is the app's bundle identifier. Public value (not a secret). Apple sign-in fails closed without it (PROVIDER_NOT_CONFIGURED → 503)."
+  description = "Native Apple Sign in with Apple audience (the app bundle identifier). Public value (not a secret). Apple sign-in fails closed without a native or web audience (PROVIDER_NOT_CONFIGURED → 503)."
   type        = string
   default     = "com.hollishealth.workouts"
+}
+
+variable "apple_web_service_id" {
+  description = "Optional Apple web Service ID audience for browser Sign in with Apple. Leave empty until Apple Developer configuration provides the real Service ID."
+  type        = string
+  default     = ""
 }
 
 variable "email_from" {

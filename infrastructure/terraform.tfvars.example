@@ -15,10 +15,12 @@ certificate_arn      = "arn:aws:acm:us-east-1:344345273019:certificate/89bb25b7-
 identity_domain_name = "identity.hollis.health"
 
 # Application config
-cors_origins   = "https://hollis.health,https://admin.hollis.health"
+cors_origins   = "https://hollis.health,https://www.hollis.health,https://admin.hollis.health"
 jwt_audiences  = "hollis-health,hollis-workouts"
 google_client_id = "669071559387-51r0f2ksiediq3rmlqpegnsvddjpndte.apps.googleusercontent.com"
 apple_service_id = "com.hollishealth.workouts"
+# Set only after Apple Developer creates/configures the actual web Service ID.
+apple_web_service_id = ""
 email_from     = "noreply@hollis.health"
 email_provider = "ses"
 reset_password_url = "https://hollis.health/reset-password"

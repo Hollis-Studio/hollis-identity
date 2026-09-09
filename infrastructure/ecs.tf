@@ -184,11 +184,14 @@ resource "aws_ecs_task_definition" "identity" {
       # Expected `aud` for Google id_token verification. Public OAuth client ID,
       # not a secret. Required — Google sign-in fails closed without it.
       { name = "GOOGLE_CLIENT_ID", value = var.google_client_id },
-      # Expected `aud` for Apple id_token verification (native iOS SIWA uses the
-      # app bundle id). Public, not a secret. Required — Apple sign-in fails
-      # closed (PROVIDER_NOT_CONFIGURED → 503) without it. Omitting it caused
+      # Expected native `aud` for Apple id_token verification. Native iOS SIWA
+      # uses the app bundle id. Public, not a secret. Omitting it caused
       # App Store Rejection #1 (2026-06-10): SIWA account creation failed review.
       { name = "APPLE_SERVICE_ID", value = var.apple_service_id },
+      # The real Apple web Service ID is separately configured after the Apple
+      # Developer portal associates it with the native App ID and return URL.
+      # Empty is safe: only the native audience is accepted in that state.
+      { name = "APPLE_WEB_SERVICE_ID", value = var.apple_web_service_id },
       { name = "CORS_ORIGINS", value = var.cors_origins },
       { name = "EMAIL_PROVIDER", value = var.email_provider },
       { name = "EMAIL_FROM", value = var.email_from },

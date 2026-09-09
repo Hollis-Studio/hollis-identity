@@ -56,7 +56,7 @@ the configured `image_tag` before ECS tasks can become healthy.
 | `identity_domain_name` | string | `"identity.dev.hollis.health"` | Public host name for the Identity API and JWT issuer (`iss` claim). |
 | `reset_password_url` | string | `"https://hollis.health/reset-password"` | Frontend password reset page URL used in password reset emails. Not the Identity API URL. |
 | `verify_email_url` | string | `"https://www.hollis.health/verify?type=email"` | Suite email verification page URL used in verification emails. Not the Identity API URL. |
-| `cors_origins` | string | `"http://localhost:3000,http://localhost:3001"` | Comma-separated allowed browser origins. |
+| `cors_origins` | string | `"https://hollis.health,https://www.hollis.health,https://admin.hollis.health"` | Comma-separated allowed first-party browser origins. Include both public hosts while both may serve the suite UI. |
 | `jwt_audiences` | string | `"hollis-health,hollis-workouts"` | Comma-separated JWT audiences (`aud` claim). |
 | `email_from` | string | `"noreply@hollis.health"` | Verified SES sender address. |
 | `email_provider` | string | `"ses"` | Email backend: `ses` or `console`. |

@@ -4,7 +4,7 @@
  * Validates only vars relevant to Identity Service:
  * - Core: DATABASE_URL, JWT_SECRET/JWT_PRIVATE_KEY, JWT_ISSUER, JWT_AUDIENCES, PASSWORD_PEPPER, PORT, LOG_LEVEL
  * - Encryption: ENCRYPTION_KEY (for MFA TOTP secret encryption)
- * - OAuth: APPLE_SERVICE_ID, IOS_BUNDLE_ID, GOOGLE_CLIENT_ID (for social sign-in id_token verification)
+ * - OAuth: APPLE_SERVICE_ID, APPLE_WEB_SERVICE_ID, IOS_BUNDLE_ID, GOOGLE_CLIENT_ID (for social sign-in id_token verification)
  * - Security: BCRYPT_COST_FACTOR, ACCESS_TOKEN_DENYLIST_ENABLED, COOKIE_DOMAIN
  * - AWS/SES: AWS_REGION (for future email/SES integration)
  * - Dev/test: E2E_SECURITY_TEST, REDIS_URL
@@ -161,6 +161,9 @@ const envSchema = z.object({
 
   // OAuth (social sign-in id_token verification)
   APPLE_SERVICE_ID: z.string().optional(),
+  // Optional Apple web Service ID. Native Sign in with Apple tokens continue
+  // to use APPLE_SERVICE_ID / IOS_BUNDLE_ID as their audience.
+  APPLE_WEB_SERVICE_ID: z.string().optional(),
   APPLE_TEAM_ID: z.string().optional(),
   IOS_BUNDLE_ID: z.string().optional(),
   GOOGLE_CLIENT_ID: z.string().optional(),

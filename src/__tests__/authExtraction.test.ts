@@ -19,6 +19,7 @@ import {
   DEFAULT_LOCKOUT_CONFIG,
 } from "../lib/accountLockout";
 import { resetEnvValidation, validateEnvOnStartup } from "../lib/env";
+import { getAppleAudiences } from "../services/oauthVerificationService";
 import type { Server } from "node:http";
 
 const TEST_JWT_SECRET = "test-secret-for-identity-service";
@@ -97,6 +98,25 @@ describe("Identity extraction invariants", () => {
     assert.throws(
       () => jwt.verify(token, TEST_JWT_SECRET, { audience: "not-hollis" }),
       /audience invalid/i,
+    );
+  });
+
+  it("accepts the native Apple audience and an optional web Service ID", () => {
+    assert.deepEqual(
+      getAppleAudiences({
+        APPLE_SERVICE_ID: "com.hollishealth.workouts",
+        APPLE_WEB_SERVICE_ID: "health.hollis.web",
+        IOS_BUNDLE_ID: "com.hollishealth.workouts",
+      }),
+      ["com.hollishealth.workouts", "health.hollis.web"],
+    );
+    assert.deepEqual(
+      getAppleAudiences({
+        APPLE_SERVICE_ID: "com.hollishealth.workouts",
+        APPLE_WEB_SERVICE_ID: "",
+        IOS_BUNDLE_ID: undefined,
+      }),
+      ["com.hollishealth.workouts"],
     );
   });
 
