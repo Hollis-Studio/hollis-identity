@@ -17,6 +17,7 @@ import { passwordSchema } from "@hollis-studio/contracts/password";
 import { Router, type Request, type Response } from "express";
 import crypto from "crypto";
 import { z } from "zod";
+import { publicRegisterBodySchema } from "../validation/publicRegistration";
 import { getPublicJwks, verifyJwt } from "../lib/jwtKeys";
 import { logger } from "../lib/logger";
 import { hashPassword } from "../lib/passwordHashing";
@@ -65,13 +66,6 @@ const loginBodySchema = z.object({
   password: z.string().min(1, "Password is required"),
 });
 
-const registerBodySchema = z.object({
-  email: z.string().email("Valid email required"),
-  password: z.string().min(6, "Password must be at least 6 characters").max(128, "Password must be at most 128 characters"),
-  displayName: z.string().trim().min(1).max(128).optional(),
-  role: z.enum(["ADMIN", "CLINICIAN", "TRAINER", "CLIENT"] as const).optional(),
-  sourceApp: z.string().trim().min(1).max(64).optional(),
-});
 
 const verificationSourceBodySchema = z.object({
   sourceApp: z.string().trim().min(1).max(64).optional(),
@@ -252,13 +246,13 @@ authRouter.post("/register", async (req: Request, res: Response) => {
   // auth-public: unauthenticated registration for Workouts / greenfield users.
   // Creates a User with email + passwordHash + role=CLIENT (default). No barcode,
   // no clinicalProfile, no organizationId required.
-  const parseResult = registerBodySchema.safeParse(req.body);
+  const parseResult = publicRegisterBodySchema.safeParse(req.body);
   if (!parseResult.success) {
     sendBadRequest(res, parseResult.error.issues[0]?.message ?? "Invalid request body");
     return;
   }
 
-  const { email, password, displayName, role = "CLIENT", sourceApp } = parseResult.data;
+  const { email, password, displayName, sourceApp } = parseResult.data;
 
   try {
     // Check if email already registered (SECURITY: use generic error to prevent enumeration)
@@ -279,7 +273,7 @@ authRouter.post("/register", async (req: Request, res: Response) => {
         email: email.toLowerCase(),
         passwordHash,
         displayName: displayName ?? null,
-        role: role as UserRole,
+        role: "CLIENT" as UserRole,
         isActive: true,
       },
     });
