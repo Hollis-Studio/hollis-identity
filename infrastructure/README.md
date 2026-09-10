@@ -58,6 +58,8 @@ the configured `image_tag` before ECS tasks can become healthy.
 | `verify_email_url` | string | `"https://www.hollis.health/verify?type=email"` | Suite email verification page URL used in verification emails. Not the Identity API URL. |
 | `cors_origins` | string | `"https://hollis.health,https://www.hollis.health,https://admin.hollis.health"` | Comma-separated allowed first-party browser origins. Include both public hosts while both may serve the suite UI. |
 | `jwt_audiences` | string | `"hollis-health,hollis-workouts"` | Comma-separated JWT audiences (`aud` claim). |
+| `apple_service_id` | string | `"com.hollishealth.workouts"` | Native Apple Sign in with Apple audience (the iOS bundle ID). |
+| `apple_web_service_id` | string | `"health.hollis.lifecoach.web"` | Apple web Service ID accepted alongside the native audience. It is grouped with the native App ID and has the approved `hollis.health` and `www.hollis.health` coaching return URLs. |
 | `email_from` | string | `"noreply@hollis.health"` | Verified SES sender address. |
 | `email_provider` | string | `"ses"` | Email backend: `ses` or `console`. |
 | `desired_count` | number | `2` | Number of ECS tasks. |
