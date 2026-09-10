@@ -127,9 +127,9 @@ variable "apple_service_id" {
 }
 
 variable "apple_web_service_id" {
-  description = "Optional Apple web Service ID audience for browser Sign in with Apple. Leave empty until Apple Developer configuration provides the real Service ID."
+  description = "Apple web Service ID audience for browser Sign in with Apple. It is grouped with the native App ID and configured for the Hollis coaching return URLs."
   type        = string
-  default     = ""
+  default     = "health.hollis.lifecoach.web"
 }
 
 variable "email_from" {
