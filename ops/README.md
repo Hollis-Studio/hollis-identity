@@ -243,13 +243,17 @@ WHERE "userId" = '<user-id>'
   AND "revokedAt" IS NULL;
 
 -- Insert a user-level access token denylist entry
--- (expiresAt = now + 15 minutes covers all outstanding access tokens)
+-- expiresAt must outlive every token the watermark covers: ACCESS_TOKEN_EXPIRY
+-- (90d, authService.ts:42-45) plus the 5-minute clock-skew margin used by
+-- userDenylistEntryExpiresAt() in src/services/tokenDenylistService.ts. A shorter
+-- value silently un-revokes those tokens once the 60s cleanup reaps the row.
+-- Keep in step with ACCESS_TOKEN_EXPIRY_MS if the access-token lifetime changes.
 INSERT INTO "UserTokenDenylistEntry" ("id", "userId", "deniedBefore", "reason", "expiresAt")
-VALUES (gen_random_uuid(), '<user-id>', NOW(), 'admin_action', NOW() + INTERVAL '15 minutes')
+VALUES (gen_random_uuid(), '<user-id>', NOW(), 'admin_action', NOW() + INTERVAL '90 days 5 minutes')
 ON CONFLICT ("userId") DO UPDATE
   SET "deniedBefore" = NOW(),
       "reason" = 'admin_action',
-      "expiresAt" = NOW() + INTERVAL '15 minutes',
+      "expiresAt" = NOW() + INTERVAL '90 days 5 minutes',
       "revokedAt" = NOW();
 ```
 
@@ -261,6 +265,8 @@ DELETE FROM "UserTokenDenylistEntry"   WHERE "expiresAt" < NOW();
 ```
 
 The service also runs automatic cleanup on a 1-minute interval via `store.startCleanupTimer()`.
+
+`UserTokenDenylistEntry` rows written before the watermark-expiry fix carry an already-lapsed 15-minute `expiresAt` and have been reaped, so any password reset or change performed before that deploy lost its revocation and is not repaired retroactively — users who reset a password believing it ended their other sessions need to reset again.
 
 ---
 

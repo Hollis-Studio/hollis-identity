@@ -3,7 +3,8 @@
  *
  * Provides immediate kill-switch behavior for access tokens. While refresh tokens
  * are tracked in the database (see authService.ts), access tokens are stateless JWTs
- * that would otherwise be valid until expiry (15 min). This denylist enables:
+ * that would otherwise be valid until expiry (90 days — ACCESS_TOKEN_EXPIRY).
+ * This denylist enables:
  *
  * 1. Immediate session termination on logout (optional - configurable)
  * 2. Immediate revocation on security events (password change, suspicious activity)
@@ -13,11 +14,15 @@
  *
  * - **Database-backed in production**: PostgreSQL stores revocation state so
  *   ECS tasks share immediate revocation decisions.
- * - **Short TTL entries**: Entries expire when the access token would expire anyway
- *   (ACCESS_TOKEN_TTL_MS), preventing unbounded memory growth.
+ * - **Entries live as long as the tokens they revoke**: an entry is only dropped once
+ *   every token it covers has expired on its own. For a JTI that is the token's own
+ *   `exp`; for a user-level watermark it is the watermark time plus the access token
+ *   lifetime (see userDenylistEntryExpiresAt). Dropping an entry earlier silently
+ *   un-revokes tokens that are still signature-valid.
  * - **Graceful degradation**: If checking the denylist adds latency, it can be disabled
- *   via ACCESS_TOKEN_DENYLIST_ENABLED=false. Short access token TTL still provides
- *   reasonable security (15 min exposure window).
+ *   via ACCESS_TOKEN_DENYLIST_ENABLED=false. That leaves refresh-token revocation as
+ *   the only kill switch, so an already-issued access token stays usable for the rest
+ *   of its 90 days — only disable it deliberately.
  * - **JTI-based**: Each access token gets a unique JTI for granular revocation.
  * - **User-based batch revocation**: Can deny all tokens for a user (indexed by userId).
  *
@@ -33,6 +38,7 @@
 import { env } from "../lib/env";
 import { logger as baseLogger } from "../lib/logger";
 import { prisma } from "../lib/prisma";
+import { ACCESS_TOKEN_EXPIRY_MS } from "./authService";
 
 const logger = baseLogger.child({ module: "tokenDenylistService" });
 
@@ -41,14 +47,43 @@ const logger = baseLogger.child({ module: "tokenDenylistService" });
 // ============================================================================
 
 /**
- * Access token TTL in milliseconds (must match authService.ts).
- * Denylist entries expire after this duration since they're no longer useful.
+ * Clock-skew margin added on top of the access token lifetime before a
+ * user-level watermark may be discarded. Identity and the task verifying the
+ * token can disagree slightly on wall-clock time, so the watermark outlives the
+ * last token it covers rather than expiring in the same instant.
  */
-const ACCESS_TOKEN_TTL_MS = 15 * 60 * 1000; // 15 minutes
+const REVOCATION_SKEW_MS = 5 * 60 * 1000; // 5 minutes
+
+/**
+ * When a user-level revocation watermark may be discarded.
+ *
+ * The watermark denies every access token issued at or before `issuedBefore`,
+ * so it has to outlive the longest-lived of those tokens: one issued in the same
+ * instant as the revocation is still signature-valid until
+ * `issuedBefore + ACCESS_TOKEN_EXPIRY_MS`. Expiring the watermark any earlier
+ * silently un-revokes them — a password reset would stop ending other sessions
+ * once the entry was reaped (the 15-minute constant that used to live here did
+ * exactly that against 90-day access tokens).
+ *
+ * ACCESS_TOKEN_EXPIRY_MS is read here instead of being copied into a local
+ * constant so the two can never drift apart again. It is read inside a function
+ * on purpose: authService imports this module, so in that import cycle the
+ * binding is only guaranteed initialized by call time, not at module load.
+ *
+ * The skew margin only extends the entry's life; it does nothing in the other
+ * direction. A token minted in the same wall-clock second as the revocation — or
+ * by a task whose clock lags the revoking one — is denied for the watermark's
+ * whole life and no longer self-heals in 15 minutes. That is the fail-secure
+ * side of `iat <= deniedBefore`; do not back `deniedBefore` off to soften it.
+ */
+export function userDenylistEntryExpiresAt(issuedBefore: Date): Date {
+  return new Date(issuedBefore.getTime() + ACCESS_TOKEN_EXPIRY_MS + REVOCATION_SKEW_MS);
+}
 
 /**
  * Whether to enable denylist checks on access tokens.
- * When disabled, relies on short TTL + refresh token revocation for security.
+ * When disabled, only refresh-token revocation remains — access tokens stay valid
+ * for the rest of their 90 days, so revocation is no longer immediate.
  * Default: true (enable for immediate revocation capability)
  */
 export const ACCESS_TOKEN_DENYLIST_ENABLED = env.ACCESS_TOKEN_DENYLIST_ENABLED;
@@ -165,7 +200,8 @@ export class InMemoryTokenDenylistStore implements TokenDenylistStore {
 
   /**
    * Map of userId -> timestamp. All tokens issued before this timestamp are denied.
-   * Entries expire after ACCESS_TOKEN_TTL_MS since older tokens are expired anyway.
+   * Entries expire once every token they cover has expired anyway
+   * (see userDenylistEntryExpiresAt).
    */
    
   private userDeniedAfter = new Map<
@@ -227,11 +263,10 @@ export class InMemoryTokenDenylistStore implements TokenDenylistStore {
     issuedBefore: Date,
     reason: RevocationReason,
   ): Promise<void> {
-    const now = Date.now();
     this.userDeniedAfter.set(userId, {
       timestamp: issuedBefore.getTime(),
       // Entry expires when all affected tokens would have expired
-      expiresAt: now + ACCESS_TOKEN_TTL_MS,
+      expiresAt: userDenylistEntryExpiresAt(issuedBefore).getTime(),
       reason,
     });
 
@@ -362,19 +397,22 @@ export class DatabaseTokenDenylistStore implements TokenDenylistStore {
     issuedBefore: Date,
     reason: RevocationReason,
   ): Promise<void> {
+    // Entry lives until every access token issued at or before the watermark has
+    // expired on its own — see userDenylistEntryExpiresAt.
+    const expiresAt = userDenylistEntryExpiresAt(issuedBefore);
     await prisma.userTokenDenylistEntry.upsert({
       where: { userId },
       update: {
         deniedBefore: issuedBefore,
         reason,
-        expiresAt: new Date(Date.now() + ACCESS_TOKEN_TTL_MS),
+        expiresAt,
         revokedAt: new Date(),
       },
       create: {
         userId,
         deniedBefore: issuedBefore,
         reason,
-        expiresAt: new Date(Date.now() + ACCESS_TOKEN_TTL_MS),
+        expiresAt,
       },
     });
   }

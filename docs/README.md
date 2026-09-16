@@ -148,7 +148,7 @@ On refresh (`POST /v1/auth/refresh`):
 
 **Backend selection:** `DatabaseTokenDenylistStore` (PostgreSQL) in production; `InMemoryTokenDenylistStore` in dev/test. The DB store uses `AccessTokenDenylistEntry` and `UserTokenDenylistEntry` tables so revocation decisions are shared across all ECS tasks and survive deploys.
 
-Denylist checking is controlled by `ACCESS_TOKEN_DENYLIST_ENABLED` (default `true`). Disabling it falls back to the access-token TTL as the security boundary.
+Denylist checking is controlled by `ACCESS_TOKEN_DENYLIST_ENABLED` (default `true`). Disabling it leaves refresh-token revocation as the only kill switch — an already-issued access token stays usable for the rest of its 90 days.
 
 ---
 
