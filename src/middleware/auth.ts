@@ -87,6 +87,22 @@ export const authenticateToken = (
         return;
       }
 
+      // jti and iat are mandatory access-token claims. Without iat, the
+      // denylist cannot compare a user-wide revocation watermark, so admitting
+      // a correctly signed but malformed token would bypass revocation checks.
+      const { userId, jti, iat } = userPayload;
+      if (
+        typeof userId !== "string" ||
+        userId.length === 0 ||
+        typeof jti !== "string" ||
+        jti.length === 0 ||
+        typeof iat !== "number" ||
+        !Number.isInteger(iat)
+      ) {
+        sendUnauthorized(res, "Invalid token claims");
+        return;
+      }
+
       if (userPayload.type !== AUTH_TOKEN_TYPE.ACCESS) {
         logger.warn(
           { userId: userPayload.userId, tokenType: userPayload.type, component: "auth" },
@@ -96,33 +112,31 @@ export const authenticateToken = (
         return;
       }
 
-      if (userPayload.jti && userPayload.iat) {
-        try {
-          const isDenied = await isAccessTokenDenied(
-            userPayload.jti,
-            userPayload.userId,
-            userPayload.iat,
+      try {
+        const isDenied = await isAccessTokenDenied(
+          jti,
+          userId,
+          iat,
+        );
+        if (isDenied) {
+          logger.info(
+            { userId: userPayload.userId, jti: userPayload.jti, component: "auth" },
+            "[SECURITY] Access denied - token has been revoked",
           );
-          if (isDenied) {
-            logger.info(
-              { userId: userPayload.userId, jti: userPayload.jti, component: "auth" },
-              "[SECURITY] Access denied - token has been revoked",
-            );
-            sendUnauthorized(res, "Token has been revoked");
-            return;
-          }
-        } catch (denylistError) {
-          // SECURITY: fail CLOSED. If we cannot determine whether a token was revoked
-          // (e.g. transient denylist DB outage), reject rather than admit a potentially
-          // revoked token onto sensitive routes (/change-password, /me, MFA).
-          logger.error(
-            { err: denylistError, userId: userPayload.userId, component: "auth" },
-            "[SECURITY] Token denylist check failed - denying request (fail-closed)",
-          );
-          metrics.increment("auth_denylist_check_failed", { userId: userPayload.userId });
-          sendUnauthorized(res, "Authentication temporarily unavailable");
+          sendUnauthorized(res, "Token has been revoked");
           return;
         }
+      } catch (denylistError) {
+        // SECURITY: fail CLOSED. If we cannot determine whether a token was revoked
+        // (e.g. transient denylist DB outage), reject rather than admit a potentially
+        // revoked token onto sensitive routes (/change-password, /me, MFA).
+        logger.error(
+          { err: denylistError, userId: userPayload.userId, component: "auth" },
+          "[SECURITY] Token denylist check failed - denying request (fail-closed)",
+        );
+        metrics.increment("auth_denylist_check_failed", { userId: userPayload.userId });
+        sendUnauthorized(res, "Authentication temporarily unavailable");
+        return;
       }
 
       req.user = {

@@ -5,13 +5,13 @@ Standalone authentication and identity service for the Hollis suite. Handles use
 **Stack:** Express 5 · Prisma 7 (adapter-pg) · PostgreSQL 16 · Node 20 · ECS Fargate · TypeScript (ESM)
 
 **Package:** `@hollis-studio/identity@0.1.0-alpha.2`  
-**Shared contracts:** `@hollis-studio/contracts@0.2.0-alpha.19` from GitHub Packages
+**Shared contracts:** `@hollis-studio/contracts@0.2.0-alpha.42` from GitHub Packages
 
 ---
 
-## Deployment status (2026-05-19)
+## Deployment status (historical snapshot: 2026-05-19)
 
-Local hardening is complete — `typecheck`, `build`, `test`, and Terraform validation are green. The service is not yet deployed; no production cutover has happened. Health still owns production auth.
+This snapshot predates later Workouts integration described in the root `README.md`. It does not establish current deployment or cutover state; confirm provider and consumer status with fresh evidence before relying on it.
 
 Remaining before cutover:
 
@@ -245,7 +245,7 @@ Sentry integration captures startup errors and unhandled rejections. `sendDefaul
 | 15 | 1 hour |
 | 20+ | 2 hours (cap) |
 
-Storage is PostgreSQL-backed in production (`AccountLockoutEntry`); in-memory in dev/test. **Login enforcement is not yet wired into the login route** — tracked as a remaining deployment task.
+Storage is PostgreSQL-backed in production (`AccountLockoutEntry`); in-memory in dev/test. The password login service checks lockout state before user lookup, records failures for both known and unknown emails, and clears the counter after a successful password verification.
 
 ---
 

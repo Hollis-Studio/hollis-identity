@@ -465,14 +465,19 @@ authRouter.post("/refresh", async (req: Request, res: Response) => {
 // GET|POST /verify
 // ============================================================================
 
-function getVerifyAudience(rawAudience: string | undefined): Audience | undefined {
-  if (!rawAudience) return undefined;
-  return AUDIENCES.find((audience) => audience === rawAudience);
+function getVerifyAudience(rawAudience: unknown): Audience | undefined | null {
+  if (rawAudience === undefined) return undefined;
+  if (typeof rawAudience !== "string") return null;
+  return AUDIENCES.find((audience) => audience === rawAudience) ?? null;
 }
 
 function verifyIdentityToken(token: string, audience?: Audience): Record<string, unknown> {
   const verifyOptions = audience ? { audience } : undefined;
-  return verifyJwt<Record<string, unknown>>(token, verifyOptions);
+  const claims = verifyJwt<Record<string, unknown>>(token, verifyOptions);
+  if (claims.type !== authService.AUTH_TOKEN_TYPE.ACCESS) {
+    throw new Error("Only access tokens may be verified for consumers");
+  }
+  return claims;
 }
 
 /**
@@ -508,7 +513,11 @@ export async function verifyTokenGetHandler(req: Request, res: Response): Promis
   const token = authHeader.substring(7);
 
   try {
-    const audience = getVerifyAudience(typeof req.query.audience === "string" ? req.query.audience : undefined);
+    const audience = getVerifyAudience(req.query.audience);
+    if (audience === null) {
+      sendBadRequest(res, "Invalid audience");
+      return;
+    }
     const decoded = verifyIdentityToken(token, audience);
 
     if (await isVerifiedTokenRevoked(decoded)) {
@@ -745,7 +754,7 @@ authRouter.post("/oauth", async (req: Request, res: Response) => {
       accessToken,
     });
 
-    res.json({ success: true, data: session, isNewUser: session.isNewUser });
+    res.json({ success: true, data: session, ...("isNewUser" in session ? { isNewUser: session.isNewUser } : {}) });
   } catch (error) {
     req.log?.error({ err: error, provider }, "OAuth sign-in error");
 

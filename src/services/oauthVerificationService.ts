@@ -21,6 +21,7 @@ import crypto from "crypto";
 import jwt from "jsonwebtoken";
 import {
   type OAuthProvider,
+  type MfaLoginPendingResponse,
 } from "@hollis-studio/contracts";
 import { getEnv } from "../lib/env";
 import { logger } from "../lib/logger";
@@ -30,8 +31,11 @@ import { writeAuditLog } from "./authAuditService";
 import {
   ACCESS_TOKEN_EXPIRY_MS,
   generateAccessToken,
+  generateAccessTokenWithJti,
+  AUTH_TOKEN_TYPE,
   issueRefreshToken,
 } from "./authService";
+import { createPendingMfaSession } from "./pendingMfaSessionService";
 import { getStore } from "./tokenDenylistService";
 
 // ============================================================================
@@ -622,7 +626,7 @@ async function assertOAuthIdTokenUnused(
 
 export async function verifyOAuthCredentials(
   input: OAuthVerificationInput,
-): Promise<OAuthAuthSession> {
+): Promise<OAuthAuthSession | MfaLoginPendingResponse> {
   const { provider, idToken, nonce } = input;
 
   let identity: OAuthIdentity;
@@ -680,6 +684,16 @@ export async function verifyOAuthCredentials(
       success: true,
       metadata: { provider, flow: "oauth_auto_registration" },
     });
+  }
+
+  if (mfaEnabled) {
+    const credentials = await runAsSystemOperation(() => prisma.mfaCredential.findMany({ where: { userId, isVerified: true }, select: { type: true } }), { reason: "auth:mfa-verify", userId });
+    const { token: sessionToken, jti } = generateAccessTokenWithJti(userId, userRole, organizationId, { tokenType: AUTH_TOKEN_TYPE.MFA_PENDING });
+    await createPendingMfaSession(jti, sessionToken, userId);
+    return {
+      mfaRequired: true, sessionToken, availableMethods: credentials.map((credential) => credential.type), expiresIn: 15 * 60,
+      user: { userId, fullName: displayName, email: email ?? "", role: userRole as MfaLoginPendingResponse["user"]["role"] },
+    };
   }
 
   return issueSession(

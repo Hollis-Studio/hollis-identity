@@ -186,6 +186,65 @@ describe("Identity HTTP auth boundary", () => {
     assert.equal(body.claims?.userId, "HH-TEST02");
   });
 
+  it("rejects refresh and MFA-pending tokens from the access-token verifier", async () => {
+    for (const tokenType of [AUTH_TOKEN_TYPE.REFRESH, AUTH_TOKEN_TYPE.MFA_PENDING]) {
+      const { token } = generateAccessTokenWithJti("HH-TEST02", "CLIENT", null, {
+        tokenType,
+      });
+      const response = await fetch(`${baseUrl}/verify`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token, audience: "hollis-workouts" }),
+      });
+      assert.equal(response.status, 401, tokenType);
+    }
+  });
+
+  it("rejects an invalid audience query instead of silently skipping audience verification", async () => {
+    const { token } = generateAccessTokenWithJti("HH-TEST02", "CLIENT", null, {
+      tokenType: AUTH_TOKEN_TYPE.ACCESS,
+    });
+    const response = await fetch(
+      `${baseUrl}/v1/auth/verify?audience=not-a-hollis-audience`,
+      { headers: { Authorization: `Bearer ${token}` } },
+    );
+    assert.equal(response.status, 400);
+  });
+
+  it("rejects malformed signed access-shaped claims before denylist checks", async () => {
+    const missingIat = jwt.sign(
+      {
+        sub: "HH-TEST02",
+        userId: "HH-TEST02",
+        role: "CLIENT",
+        type: AUTH_TOKEN_TYPE.ACCESS,
+        jti: "missing-iat",
+        aud: ["hollis-workouts"],
+      },
+      TEST_JWT_SECRET,
+      { noTimestamp: true, expiresIn: "1h" },
+    );
+    const nonStringUserId = jwt.sign(
+      {
+        sub: "HH-TEST02",
+        userId: 123,
+        role: "CLIENT",
+        type: AUTH_TOKEN_TYPE.ACCESS,
+        jti: "numeric-user-id",
+        aud: ["hollis-workouts"],
+      },
+      TEST_JWT_SECRET,
+      { expiresIn: "1h" },
+    );
+
+    for (const token of [missingIat, nonStringUserId]) {
+      const response = await fetch(`${baseUrl}/v1/auth/mfa/status`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      assert.equal(response.status, 401);
+    }
+  });
+
   it("rejects invalid verify requests without cookies", async () => {
     const response = await fetch(`${baseUrl}/verify`, {
       method: "POST",
