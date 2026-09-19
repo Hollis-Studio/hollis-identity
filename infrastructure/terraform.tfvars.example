@@ -31,5 +31,9 @@ verify_email_url = "https://www.hollis.health/verify?type=email"
 desired_count = 2
 cpu           = 512
 memory        = 1024
-image_tag     = "latest"
+# Commit SHA to render into the task definition. NOT "latest" (mutable tag that
+# CI re-points every build). Set this to the SHA the live service is running:
+#   aws ecs describe-task-definition --task-definition hollis-identity-prod \
+#     --query 'taskDefinition.containerDefinitions[0].image' --output text
+image_tag     = "REPLACE_WITH_DEPLOYED_COMMIT_SHA"
 log_level     = "info"

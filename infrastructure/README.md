@@ -38,10 +38,27 @@ Do not apply production without first setting:
 - `certificate_arn` to an ACM certificate in the same region
 - a production `identity_domain_name`
 - a production `reset_password_url` that points at the frontend reset-password page, not the Identity API
-- a production-specific Terraform backend/state location
+- an immutable `image_tag` (a commit SHA, never `latest` — the variable rejects it)
 
 The application container must be pushed to the output `ecr_repository_url` with
 the configured `image_tag` before ECS tasks can become healthy.
+
+## Terraform state
+
+State lives in the shared suite backend, configured in `versions.tf`:
+
+| | |
+| --- | --- |
+| Bucket | `hollis-health-tf-state-prod` (versioned, SSE-AES256, public access blocked) |
+| Key | `hollis-identity/terraform.tfstate` |
+| Locking | DynamoDB `hollis-health-tf-locks-prod` (shared with health and workouts) |
+
+`terraform init` picks this up with no extra flags. State is **not** kept on a
+workstation: it holds the generated `random_password.db`,
+`random_password.encryption_key`, `random_password.jwt_secret`,
+`random_password.password_pepper` and `tls_private_key.jwt`. If it is lost, the
+next `apply` regenerates all of them — rotating the password pepper, which makes
+every stored password hash unverifiable. S3 versioning is the recovery path.
 
 ## Variables
 
@@ -51,7 +68,7 @@ the configured `image_tag` before ECS tasks can become healthy.
 | `aws_region` | string | `"us-east-1"` | AWS region for the Identity service. |
 | `environment` | string | `"dev"` | Deployment environment name. |
 | `project` | string | `"hollis-identity"` | Project/service name used in resource names. |
-| `image_tag` | string | `"latest"` | Container image tag deployed by ECS. |
+| `image_tag` | string | _(required)_ | Immutable image tag (commit SHA) rendered into the task definition. `"latest"` is rejected. |
 | `certificate_arn` | string | `""` | ACM certificate ARN for HTTPS listener. Leave empty to create HTTP-only dev ALB. |
 | `identity_domain_name` | string | `"identity.dev.hollis.health"` | Public host name for the Identity API and JWT issuer (`iss` claim). |
 | `reset_password_url` | string | `"https://hollis.health/reset-password"` | Frontend password reset page URL used in password reset emails. Not the Identity API URL. |
@@ -93,7 +110,7 @@ the configured `image_tag` before ECS tasks can become healthy.
 
 ## Security Notes
 
-- The RSA private key is generated in Terraform state. Protect state with encryption and restrict access.
+- The RSA private key and the password pepper are generated in Terraform state. State is stored encrypted and versioned in S3 (see "Terraform state"); restrict access to that bucket accordingly.
 - <!-- UNVERIFIED: SES sender identity must be verified in the target AWS account/region before emails can be sent -->
 - The `app` Secrets Manager secret stores both the HMAC `JWT_SECRET` and the RSA key pair. Rotate via `terraform apply` after removing the `random_password` / `tls_private_key` resources from state, or use AWS Secrets Manager rotation.
 - WAF CloudWatch metrics and sampled requests are enabled for the rate-limit rule and the web ACL as a whole.

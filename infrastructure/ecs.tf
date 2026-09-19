@@ -249,5 +249,15 @@ resource "aws_ecs_service" "identity" {
     container_port   = 4001
   }
 
+  lifecycle {
+    # task_definition + platform_version: the GitHub Actions deploy role
+    # (github-actions-deploy.tf) registers new task definition revisions and
+    # rolls the service. Terraform must not drag the service back to whatever
+    # revision this state last recorded. platform_version LATEST is resolved by
+    # Fargate to a concrete version, which would otherwise be perpetual drift.
+    # Matches hollis-health-app modules/ecs and modules/ecs-web-admin.
+    ignore_changes = [desired_count, task_definition, platform_version]
+  }
+
   depends_on = [aws_lb_listener_rule.identity_host]
 }

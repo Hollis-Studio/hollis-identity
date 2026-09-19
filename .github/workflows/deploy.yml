@@ -19,8 +19,8 @@
 # the CURRENTLY-DEPLOYED task definition and swaps only the image, so any env
 # (e.g. GOOGLE_CLIENT_ID) and secrets stay exactly as the live task def has them.
 # Infra/env changes live in infrastructure/*.tf and are applied by a human
-# running `terraform apply` (this repo keeps Terraform state LOCAL — CI never
-# runs Terraform).
+# running `terraform apply` (Terraform state lives in the shared S3 backend —
+# see infrastructure/versions.tf — and CI never runs Terraform).
 #
 # One-time setup (see infrastructure/github-actions-deploy.tf header):
 #   1. terraform apply           # creates the deploy role

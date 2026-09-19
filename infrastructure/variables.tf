@@ -23,9 +23,18 @@ variable "project" {
 }
 
 variable "image_tag" {
-  description = "Container image tag deployed by ECS."
+  description = "Immutable container image tag (commit SHA) for the Terraform-rendered task definition."
   type        = string
-  default     = "latest"
+  # No default: "latest" is a MUTABLE tag that CI re-points on every build
+  # (.github/workflows/deploy.yml pushes both :<sha> and :latest), so a default
+  # of "latest" makes the rendered task definition depend on when you ran apply.
+  # The live revision is rolled by CI; this value only sets what Terraform
+  # renders. Pin it to the SHA currently deployed before applying.
+
+  validation {
+    condition     = var.image_tag != "latest"
+    error_message = "image_tag must be an immutable build tag or commit SHA, not latest."
+  }
 }
 
 # ---------------------------------------------------------------------------
