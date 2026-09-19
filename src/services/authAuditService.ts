@@ -58,13 +58,8 @@ export function writeAuditLog(params: WriteAuditLogParams): void {
 }
 
 /**
- * Extract IP address from Express request (handles proxy headers).
+ * Use Express's configured proxy trust boundary, never raw client XFF entries.
  */
 export function extractIp(req: { ip?: string; headers: Record<string, string | string[] | undefined> }): string | undefined {
-  const forwarded = req.headers["x-forwarded-for"];
-  if (forwarded) {
-    const first = Array.isArray(forwarded) ? forwarded[0] : forwarded.split(",")[0];
-    return first?.trim();
-  }
   return req.ip;
 }

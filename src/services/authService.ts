@@ -20,6 +20,7 @@ import {
   type Audience,
 } from "@hollis-studio/contracts";
 import crypto from "crypto";
+import jwt from "jsonwebtoken";
 import { USER_ERRORS } from "../constants/errorMessages";
 import { getEnv } from "../lib/env";
 import { signJwt, verifyJwt } from "../lib/jwtKeys";
@@ -562,7 +563,7 @@ export async function refresh(
         }
 
         if (storedToken.expiresAt < new Date()) {
-          logger.warn(
+          logger.info(
             { userId: decoded.userId, component: "authService" },
             "[AUTH] Refresh attempt with expired token",
           );
@@ -648,7 +649,15 @@ export async function refresh(
         };
       } catch (error) {
         if (error instanceof AuthError) throw error;
-        throw new AuthError("Invalid or expired refresh token", "TOKEN_EXPIRED");
+        if (error instanceof jwt.TokenExpiredError) {
+          throw new AuthError("Invalid or expired refresh token", "TOKEN_EXPIRED");
+        }
+        if (error instanceof jwt.JsonWebTokenError) {
+          throw new AuthError("Invalid refresh token", "TOKEN_INVALID");
+        }
+        // A database/signing outage is not an expired session. Preserve the
+        // original error so the route reports 500 and operational alerts fire.
+        throw error;
       }
     },
     { reason: "auth:refresh", userId: undefined },

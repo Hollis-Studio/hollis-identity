@@ -74,6 +74,7 @@ import {
   loginRateLimiter,
 } from "./middleware/rateLimit.js";
 import { prisma } from "./lib/prisma.js";
+import { configureProxyTrust } from "./lib/proxyTrust.js";
 
 // ============================================================================
 // Helpers
@@ -113,6 +114,7 @@ function requestContext(req: Request, res: Response, next: NextFunction): void {
 
 export function createApp(): express.Express {
   const app = express();
+  configureProxyTrust(app, env.NODE_ENV);
 
 // ============================================================================
 // Middleware

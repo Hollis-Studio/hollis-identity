@@ -26,6 +26,7 @@ import { runAsSystemOperation } from "../lib/tenantContext";
 import { authenticateToken } from "../middleware/auth";
 import * as authService from "../services/authService";
 import { AuthError } from "../services/authService";
+import { logAuthFailure } from "../lib/authFailureLogging";
 import { sendPasswordResetEmail } from "../services/emailService";
 import {
   confirmEmailVerification,
@@ -202,7 +203,7 @@ authRouter.post("/login", async (req: Request, res: Response) => {
       },
     });
   } catch (error) {
-    req.log?.error({ err: error }, "Login error");
+    logAuthFailure(req.log, "login", error);
 
     writeAuditLog({
       eventType: "LOGIN_FAILED",
@@ -438,7 +439,7 @@ authRouter.post("/refresh", async (req: Request, res: Response) => {
       },
     });
   } catch (error) {
-    req.log?.error({ err: error }, "Refresh error");
+    logAuthFailure(req.log, "refresh", error);
 
     writeAuditLog({
       eventType: "TOKEN_REFRESH_FAILED",
@@ -448,7 +449,7 @@ authRouter.post("/refresh", async (req: Request, res: Response) => {
       metadata: { reason: error instanceof AuthError ? error.code : "UNKNOWN" },
     });
 
-  if (error instanceof AuthError) {
+    if (error instanceof AuthError) {
       if (error.code === "TOKEN_REVOKED") {
         sendUnauthorized(res, "Session has been revoked - please log in again");
         return;
@@ -457,7 +458,7 @@ authRouter.post("/refresh", async (req: Request, res: Response) => {
       return;
     }
 
-    sendUnauthorized(res, "Invalid or expired refresh token");
+    sendError(res, "Unable to refresh session", 500, undefined, "REFRESH_ERROR");
   }
 });
 
