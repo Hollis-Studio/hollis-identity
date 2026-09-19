@@ -437,8 +437,43 @@ export async function authenticatePasswordUser(
 }
 
 /**
+ * Prisma "record to update not found". The row is already gone (deleted account,
+ * reaped token), so there is nothing left to revoke — that is a completed logout,
+ * not a failed one.
+ */
+function isRecordNotFound(error: unknown): boolean {
+  return (error as { code?: string } | null)?.code === "P2025";
+}
+
+/**
+ * Decode a token presented to the unauthenticated logout endpoint, or undefined
+ * when it is not a server-issued token.
+ *
+ * SECURITY: verify the signature before acting on it. The endpoint is
+ * unauthenticated, so without this an attacker could attempt to revoke arbitrary
+ * sessions by submitting forged/guessed token strings. A verification failure is
+ * deliberately swallowed: telling the caller whether a submitted string was real
+ * would turn logout into a token oracle.
+ */
+function decodeLogoutToken<T extends object>(token: string, what: string): T | undefined {
+  try {
+    return verifyJwt<T>(token, { ignoreExpiration: true });
+  } catch (error) {
+    logger.warn(
+      { err: error, component: "authService" },
+      `Logout presented an unverifiable ${what}`,
+    );
+    return undefined;
+  }
+}
+
+/**
  * Logout — revokes the refresh token and (if supplied) denies the session's
  * access token so explicit sign-out takes effect before natural token expiry.
+ *
+ * A store outage propagates instead of being reported as a completed logout: the
+ * tokens would still be usable for the rest of their 365/90-day lives, and a
+ * caller told `success` has no way to learn that.
  */
 export async function logout(
   refreshToken?: string,
@@ -449,18 +484,16 @@ export async function logout(
       let sessionUserId: string | undefined;
 
       if (refreshToken) {
-        try {
-          // SECURITY: verify the refresh token's signature before revoking. The endpoint
-          // is unauthenticated, so without this an attacker could attempt to revoke
-          // arbitrary sessions by submitting forged/guessed token strings. Revocation
-          // stays keyed by the token hash (caller must hold the real token); we only
-          // additionally require it to be a server-issued refresh token.
-          const decoded = verifyJwt<{ userId?: string; type?: string }>(refreshToken, {
-            ignoreExpiration: true,
-          });
-          if (decoded.type === AUTH_TOKEN_TYPE.REFRESH) {
-            sessionUserId = decoded.userId;
-            const tokenHash = crypto.createHash("sha256").update(refreshToken).digest("hex");
+        // Revocation stays keyed by the token hash (the caller must hold the real
+        // token); we only additionally require a server-issued refresh token.
+        const decoded = decodeLogoutToken<{ userId?: string; type?: string }>(
+          refreshToken,
+          "refresh token",
+        );
+        if (decoded?.type === AUTH_TOKEN_TYPE.REFRESH) {
+          sessionUserId = decoded.userId;
+          const tokenHash = crypto.createHash("sha256").update(refreshToken).digest("hex");
+          try {
             await prisma.refreshToken.update({
               where: { tokenHash },
               data: {
@@ -468,12 +501,13 @@ export async function logout(
                 revokedReason: REVOKED_REASON.LOGOUT,
               },
             });
+          } catch (error) {
+            if (!isRecordNotFound(error)) throw error;
+            logger.info(
+              { component: "authService" },
+              "Logout found no stored refresh token to revoke",
+            );
           }
-        } catch (error) {
-          logger.warn(
-            { err: error, component: "authService" },
-            "Failed to revoke token on logout",
-          );
         }
       }
 
@@ -482,26 +516,19 @@ export async function logout(
       // denylist-aware verify path — instead of remaining valid until natural expiry.
       // Scoped to this token's jti so other devices/sessions stay signed in.
       if (accessToken) {
-        try {
-          const decoded = verifyJwt<{
-            userId?: string;
-            type?: string;
-            jti?: string;
-            exp?: number;
-          }>(accessToken, { ignoreExpiration: true });
-          if (
-            decoded.type === AUTH_TOKEN_TYPE.ACCESS &&
-            decoded.jti &&
-            decoded.exp != null &&
-            (sessionUserId == null || decoded.userId === sessionUserId)
-          ) {
-            await denyAccessToken(decoded.jti, new Date(decoded.exp * 1000), "logout");
-          }
-        } catch (error) {
-          logger.warn(
-            { err: error, component: "authService" },
-            "Failed to deny access token on logout",
-          );
+        const decoded = decodeLogoutToken<{
+          userId?: string;
+          type?: string;
+          jti?: string;
+          exp?: number;
+        }>(accessToken, "access token");
+        if (
+          decoded?.type === AUTH_TOKEN_TYPE.ACCESS &&
+          decoded.jti &&
+          decoded.exp != null &&
+          (sessionUserId == null || decoded.userId === sessionUserId)
+        ) {
+          await denyAccessToken(decoded.jti, new Date(decoded.exp * 1000), "logout");
         }
       }
 
