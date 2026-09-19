@@ -1,6 +1,6 @@
 # Hollis Identity Service
 
-Read the workspace-level `../AGENTS.md` first. It defines the shared governance and coordination protocol; do not duplicate it here. When that protocol calls for coordination, use `../agent-coordination/board.py` (or `hollis-board` when installed), register/touch activity, and claim exact files before editing.
+Read the workspace-level `../AGENTS.md` first. It defines the shared governance and coordination protocol; do not duplicate it here. Coordination is required for every task in this checkout, not only when you expect overlap: use `../agent-coordination/board.py` (or `hollis-board` when installed), check in announcing your goal and the surfaces you will touch, register/touch activity, claim exact files before editing, and leave a summary. Do this even when `status` shows no other active agents — an empty status is not evidence that you are alone, and the announcement is what the next agent reads.
 
 This is a TypeScript ESM Express 5 service. `src/index.ts` builds the app; `src/routes/` owns HTTP contracts; `src/services/` owns auth flows; `src/lib/` provides security and infrastructure concerns; `prisma/schema.prisma` and migrations define persistence. Treat token formats, password/MFA flows, rate limits, audit events, and public error messages as compatibility and security boundaries. Preserve anti-enumeration behavior and never log credentials, tokens, reset links, or secret values.
 
