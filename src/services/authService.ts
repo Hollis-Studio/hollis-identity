@@ -9,7 +9,7 @@
  * - No runAsSystemOperation/tenantContext (Identity Service has no PHI multi-tenancy)
  *
  * Token policy is intentionally device-sticky for consumer mobile apps: long-lived
- * access tokens, stable refresh tokens, and unchanged refresh tokens on ordinary refresh.
+ * access tokens and rotating refresh tokens with bounded retry recovery.
  *
  * deps: prisma, passwordHashing, jsonwebtoken, crypto | consumers: routes/auth.ts
  */
@@ -34,6 +34,7 @@ import { rehashIfNeeded, verifyPassword } from "../lib/passwordHashing";
 import { timingSafePasswordVerify } from "../lib/securityUtils";
 import { prisma } from "../lib/prisma";
 import { runAsSystemOperation } from "../lib/tenantContext";
+import { rotateRefreshToken, RefreshRotationError } from "./refreshRotation";
 import { denyAccessToken } from "./tokenDenylistService";
 
 // ============================================================================
@@ -542,10 +543,9 @@ export async function logout(
 }
 
 /**
- * Refresh an authentication token without rotating the refresh token.
- *
- * Consumer mobile policy: validate the stable refresh token, issue a fresh
- * long-lived access token, and return the same refresh token.
+ * Refresh access and rotate the refresh credential atomically. Concurrent or
+ * lost-response retries receive the same successor for 120 seconds; later reuse
+ * revokes the family and outstanding access tokens.
  */
 export async function refresh(
   refreshToken: string,
@@ -643,10 +643,11 @@ export async function refresh(
           }
         }
 
+        const rotatedRefreshToken = await rotateRefreshToken(refreshToken, decoded);
         const refreshMfaEnabled = user._count.mfaCredentials > 0;
         const idToken = generateAccessToken(
           decoded.userId,
-          decoded.role,
+          user.role,
           user.organizationId,
           { mfaVerifiedAt: carryMfaVerifiedAt, mfaEnabled: refreshMfaEnabled },
         );
@@ -655,7 +656,7 @@ export async function refresh(
 
         logger.info(
           { userId: user.id, familyId: storedToken.familyId, component: "authService" },
-          "[AUTH] Access token refreshed with stable refresh token",
+          "[AUTH] Access token refreshed with rotating refresh token",
         );
 
         return {
@@ -670,11 +671,12 @@ export async function refresh(
           },
           provider: "password",
           idToken,
-          refreshToken,
+          refreshToken: rotatedRefreshToken,
           expiresAt,
           onboardingCompleted: false, // TODO(W6f): add onboardingCompleted to User model
         };
       } catch (error) {
+        if (error instanceof RefreshRotationError) throw new AuthError(error.message, error.code);
         if (error instanceof AuthError) throw error;
         if (error instanceof jwt.TokenExpiredError) {
           throw new AuthError("Invalid or expired refresh token", "TOKEN_EXPIRED");
