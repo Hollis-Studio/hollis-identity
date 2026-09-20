@@ -1,0 +1,114 @@
+# ==============================================================================
+# Identity Checks — reusable workflow
+# ==============================================================================
+#
+# The single definition of "is this commit sound?" for hollis-identity. It is
+# called from two places so the deploy gate and the PR gate can never drift:
+#
+#   .github/workflows/ci.yml      — pull requests + pushes to main
+#   .github/workflows/deploy.yml  — as the `checks` job the deploy job needs
+#
+# `workflow_call` (not `workflow_run`) is deliberate: the caller and callee are
+# one workflow graph on one commit, so `needs:` works, the ref/SHA semantics are
+# the caller's, and nothing about deploy.yml's OIDC subject changes.
+#
+# npm auth: `@hollis-studio/*` (contracts) comes from GitHub Packages. The
+# committed .npmrc maps the scope and reads `${NODE_AUTH_TOKEN}`, which npm
+# expands from the environment — same pattern deploy.yml feeds into the Docker
+# build as a BuildKit secret. Callers must pass `secrets: inherit`.
+# ==============================================================================
+
+name: Identity Checks
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    name: Typecheck, build, test
+    runs-on: ubuntu-22.04
+
+    # package.json's `test` script hardcodes
+    # DATABASE_URL=postgresql://test:test@localhost:5432/test, so the service
+    # container credentials/database below must match it exactly. Changing
+    # either side without the other turns the suite red.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U test -d test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      # Only used by the steps that talk to the database directly. `npm test`
+      # supplies its own copy from package.json.
+      DATABASE_URL: postgresql://test:test@localhost:5432/test
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Matches the Dockerfile base image (node:22-alpine).
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install dependencies
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}
+        run: npm ci
+
+      # prisma/generated/ is gitignored, so the generated client must be built
+      # before tsc can resolve it.
+      - name: Generate Prisma client
+        run: npm run prisma:generate
+
+      # Brings the service container's schema up to date. The tests are written
+      # against in-memory stores under NODE_ENV=test, but the migrations are the
+      # thing the container runs at startup in production — applying them here
+      # is the only automated check that they still apply cleanly from empty.
+      - name: Apply migrations to the test database
+        run: npm run prisma:migrate:deploy
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build
+        run: npm run build
+
+      - name: Test
+        run: npm test
+
+      # Report-only, deliberately NOT gating (yet).
+      #
+      # Reason: this repo has never had CI, so the current advisory count is
+      # unknown and unreviewed. Gating on day one would either block every PR or
+      # be silenced with a blanket `--audit-level=critical`, and a lockfile fix
+      # cannot be taken here without a dependency bump nobody has reviewed.
+      # The step exists so the number is visible in every run and in the job
+      # summary; flip `continue-on-error` to false once the backlog is at zero
+      # and Dependabot (see .github/dependabot.yml) is keeping it there.
+      - name: Dependency audit (report only)
+        continue-on-error: true
+        run: |
+          npm audit --omit=dev --audit-level=high | tee /tmp/audit.txt
+          {
+            echo "## npm audit (production dependencies, high+)"
+            echo ""
+            echo '```'
+            cat /tmp/audit.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -343,6 +343,18 @@ export function validateEnvOnStartup(): void {
         "GOOGLE_CLIENT_ID not set. Google Sign In will be unavailable.",
       );
     }
+    // EMAIL_PROVIDER defaults to "console", so a production task that simply
+    // never had the variable set would "deliver" password-reset and email
+    // verification links by printing them instead of emailing them: the user
+    // never gets the link and the account-takeover credential lands in the
+    // service's output. Fail to boot rather than run in that state.
+    if (validated.EMAIL_PROVIDER === "console") {
+      errors.push(
+        "EMAIL_PROVIDER=console is not allowed in production — reset/verification " +
+        "links would be printed instead of emailed, and no user would receive them. " +
+        "Set EMAIL_PROVIDER=ses (with AWS_REGION, RESET_PASSWORD_URL, VERIFY_EMAIL_URL).",
+      );
+    }
     if (validated.EMAIL_PROVIDER === "ses" && !validated.AWS_REGION) {
       errors.push("EMAIL_PROVIDER=ses but AWS_REGION is not set.");
     }

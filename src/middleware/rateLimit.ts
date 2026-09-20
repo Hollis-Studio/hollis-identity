@@ -292,14 +292,26 @@ export const barcodeRateLimiter = rateLimit({
   store: createRateLimitStore("barcode"),
 });
 
+export const SENSITIVE_RATE_LIMIT_WINDOW_MS = 60 * 60 * 1000;
+export const SENSITIVE_RATE_LIMIT_MAX = 5;
+
 /**
  * Strict rate limiter for sensitive operations (password reset, account changes)
- * - 3 requests per hour per IP
+ * - 5 requests per hour per IP in production (50 in dev/test)
  * - Strong protection against enumeration/abuse
+ *
+ * Mounted on POST /v1/auth/forgot-password and POST /v1/auth/reset-password
+ * (see index.ts). Both paths share this one store, so the budget covers a whole
+ * password-reset flow from one IP: the base of 5 leaves room for 1 forgot-password
+ * request plus 4 reset-password submissions (a mistyped/too-weak new password
+ * returns 400 and still counts) inside the 30-minute reset-token TTL. It was 3
+ * while this limiter was never mounted at all; 3 would have let a single
+ * validation-error retry consume the budget and strand the user for an hour with
+ * an already-expiring token.
  */
 export const sensitiveRateLimiter = rateLimit({
-  windowMs: 60 * 60 * 1000, // 1 hour
-  max: 3, // 3 requests per hour
+  windowMs: SENSITIVE_RATE_LIMIT_WINDOW_MS, // 1 hour
+  max: () => effectiveMax(SENSITIVE_RATE_LIMIT_MAX),
   handler: (_req, res, _next, options) => {
     const retryAfterSeconds = Math.ceil(options.windowMs / 1000);
     res.setHeader("Retry-After", retryAfterSeconds.toString());
@@ -313,6 +325,62 @@ export const sensitiveRateLimiter = rateLimit({
   legacyHeaders: false,
   skip: () => shouldSkipInTest(), // Skip in tests unless E2E_SECURITY_TEST
   store: createRateLimitStore("sensitive"),
+});
+
+export const VERIFY_RATE_LIMIT_WINDOW_MS = 60 * 1000;
+export const VERIFY_RATE_LIMIT_MAX = 600;
+
+/**
+ * Rate limiter for the root token-introspection endpoint (POST /verify).
+ *
+ * This endpoint is service-to-service, not user-facing: `@hollis-studio/auth-client`
+ * builds `POST {IDENTITY_SERVICE_URL}/verify` on its remote path, which is how
+ * Workouts' revocation gate (hollis-workouts/server/src/middleware/auth.ts) and
+ * Health's coaching identity link (hollis-health-app/server/src/services/coachingIdentityService.ts)
+ * consult the access-token denylist. Those callers reach Identity from a handful of
+ * ECS task IPs, so every consumer request from one task lands in the same bucket —
+ * a user-scale limit here would take down Health/Workouts auth, not an attacker.
+ *
+ * 600/minute per IP (10 req/s sustained, per calling task) is chosen so that:
+ * - the current pattern (sign-in-time and irreversible-mutation checks at <20 users)
+ *   is orders of magnitude below the ceiling;
+ * - even the worst legitimate case — a consumer losing IDENTITY_JWT_SECRET so
+ *   auth-client falls back to one remote /verify per API request — still fits;
+ * - a single source cannot use the endpoint as an unbounded token/denylist oracle,
+ *   since each call costs two denylist reads against Postgres.
+ *
+ * Violations are logged (like webhookRateLimiter) because a 429 here means either a
+ * misconfigured consumer or someone hammering the introspection endpoint; both need
+ * to be visible. Edge-level AWS WAF rules remain the primary protection (see header).
+ */
+export const verifyRateLimiter = rateLimit({
+  windowMs: VERIFY_RATE_LIMIT_WINDOW_MS,
+  max: VERIFY_RATE_LIMIT_MAX,
+  handler: (req, res, _next, options) => {
+    const retryAfterSeconds = Math.ceil(options.windowMs / 1000);
+
+    logger.warn(
+      {
+        ip: req.ip ?? "unknown",
+        path: req.path,
+        userAgent: req.headers["user-agent"],
+        retryAfterSeconds,
+      },
+      "Token verify rate limit exceeded",
+    );
+
+    res.setHeader("Retry-After", retryAfterSeconds.toString());
+    sendTooManyRequests(
+      res,
+      "Too many verification requests. Please retry after the specified time.",
+      retryAfterSeconds,
+    );
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+  skipSuccessfulRequests: false,
+  skip: () => shouldSkipInTest(), // Skip in tests unless E2E_SECURITY_TEST
+  store: createRateLimitStore("verify"),
 });
 
 /**

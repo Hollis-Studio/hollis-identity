@@ -181,3 +181,31 @@ variable "log_level" {
   type        = string
   default     = "info"
 }
+
+# ---------------------------------------------------------------------------
+# Observability
+# ---------------------------------------------------------------------------
+
+variable "sentry_dsn" {
+  description = "Sentry project DSN for the Identity container. Empty (the default) omits SENTRY_DSN from the task definition entirely, so the app skips Sentry init and only logs a startup warning. Supply a DSN to enable crash reporting."
+  type        = string
+  default     = ""
+}
+
+variable "alerts_sns_topic_name" {
+  description = "Name of the EXISTING operational alerts SNS topic that Identity alarms publish to. Owned by hollis-health-app (infrastructure/aws/modules/monitoring); referenced here read-only via a data source, never created or modified by this stack."
+  type        = string
+  default     = "hollis-prod-operational-alerts"
+}
+
+variable "alarm_actions_enabled" {
+  description = "Master switch for Identity CloudWatch alarm notifications. The alarms are always created and always evaluate (so history exists); false only stops them notifying. Mirrors hollis-health-app's park_alarm_actions_enabled."
+  type        = bool
+  default     = true
+}
+
+variable "alb_latency_p95_threshold_seconds" {
+  description = "p95 target response time (seconds) above which the Identity latency alarm fires."
+  type        = number
+  default     = 2
+}

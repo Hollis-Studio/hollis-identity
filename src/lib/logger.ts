@@ -65,6 +65,80 @@ const logLevel: ValidLogLevel = (
 // @deferred[OBS-1]: No AsyncLocalStorage request context — requestId not propagated through service layer; acceptable logging fidelity at <20 users; revisit when concurrency or incident response demands it
 
 /**
+ * Fields stripped from every log record (pino `redact` with `remove: true`).
+ *
+ * Exported so the redaction contract can be asserted in tests instead of being
+ * re-declared there — a path that is missing here is a leak, not a test detail.
+ */
+export const REDACTED_LOG_PATHS: readonly string[] = [
+  // Auth/security fields
+  "req.headers.authorization",
+  "req.headers.cookie",
+  "password",
+  "passwordHash",
+  "token",
+  "refreshToken",
+  "idToken",
+  "accessToken",
+  "apiKey",
+  // Password-reset and email-verification links carry a single-use bearer
+  // token in their query string — logging one hands over the account.
+  "resetUrl",
+  "verifyUrl",
+  "*.resetUrl",
+  "*.verifyUrl",
+  "*.password",
+  "*.passwordHash",
+  "*.token",
+  "*.refreshToken",
+  "*.accessToken",
+  "*.apiKey",
+  // PHI fields - must never be logged (HIPAA identifiers)
+  "email",
+  "*.email",
+  "dateOfBirth",
+  "*.dateOfBirth",
+  "dob",
+  "*.dob",
+  "ssn",
+  "*.ssn",
+  "phoneNumber",
+  "*.phoneNumber",
+  "phone",
+  "*.phone",
+  // Additional HIPAA identifiers
+  "firstName",
+  "*.firstName",
+  "lastName",
+  "*.lastName",
+  "fullName",
+  "*.fullName",
+  "address",
+  "*.address",
+  "streetAddress",
+  "*.streetAddress",
+  "city",
+  "*.city",
+  "zipCode",
+  "*.zipCode",
+  "medicalRecordNumber",
+  "*.medicalRecordNumber",
+  "mrn",
+  "*.mrn",
+  "insuranceId",
+  "*.insuranceId",
+  // Patient barcodes are PHI identifiers (format: HH-XXXXXX)
+  "barcode",
+  "*.barcode",
+  "code",
+  "*.code",
+  // Request body/query protection (may contain PHI)
+  "req.body",
+  "req.query",
+  "res.body",
+];
+
+/**
  * Root logger instance.
  * In development, uses pino-pretty for human-readable output.
  * In production, outputs JSON for log aggregation tools (CloudWatch, Datadog, etc.)
@@ -73,7 +147,12 @@ export const logger = pino({
   level: logLevel,
   // Base context included in all logs
   base: {
-    service: "hollis-health-api",
+    // Identity runs as its own ECS service and ships to its own log group.
+    // It previously inherited "hollis-health-api" from the Health server this
+    // file was lifted from, which made Identity lines indistinguishable from
+    // the Health API's in any cross-service log search. Nothing keys off the
+    // old value (no CloudWatch metric filter or alarm references `service`).
+    service: "hollis-identity",
     env: process.env.NODE_ENV ?? "development",
     // Instance/container ID for multi-instance ECS deployments
     instanceId: process.env.ECS_TASK_ID ?? process.env.HOSTNAME ?? "local",
@@ -82,67 +161,7 @@ export const logger = pino({
   timestamp: pino.stdTimeFunctions.isoTime,
   // Redact sensitive fields
   redact: {
-    paths: [
-      // Auth/security fields
-      "req.headers.authorization",
-      "req.headers.cookie",
-      "password",
-      "passwordHash",
-      "token",
-      "refreshToken",
-      "idToken",
-      "accessToken",
-      "apiKey",
-      "*.password",
-      "*.passwordHash",
-      "*.token",
-      "*.refreshToken",
-      "*.accessToken",
-      "*.apiKey",
-      // PHI fields - must never be logged (HIPAA identifiers)
-      "email",
-      "*.email",
-      "dateOfBirth",
-      "*.dateOfBirth",
-      "dob",
-      "*.dob",
-      "ssn",
-      "*.ssn",
-      "phoneNumber",
-      "*.phoneNumber",
-      "phone",
-      "*.phone",
-      // Additional HIPAA identifiers
-      "firstName",
-      "*.firstName",
-      "lastName",
-      "*.lastName",
-      "fullName",
-      "*.fullName",
-      "address",
-      "*.address",
-      "streetAddress",
-      "*.streetAddress",
-      "city",
-      "*.city",
-      "zipCode",
-      "*.zipCode",
-      "medicalRecordNumber",
-      "*.medicalRecordNumber",
-      "mrn",
-      "*.mrn",
-      "insuranceId",
-      "*.insuranceId",
-      // Patient barcodes are PHI identifiers (format: HH-XXXXXX)
-      "barcode",
-      "*.barcode",
-      "code",
-      "*.code",
-      // Request body/query protection (may contain PHI)
-      "req.body",
-      "req.query",
-      "res.body",
-    ],
+    paths: [...REDACTED_LOG_PATHS],
     remove: true,
   },
   // Pretty print in development

@@ -170,7 +170,20 @@ resource "aws_ecs_task_definition" "identity" {
       protocol      = "tcp"
     }]
 
-    environment = [
+    # The tail of this concat() adds SENTRY_DSN only when var.sentry_dsn is
+    # non-empty, so the setting is inert until Isaac supplies a DSN: the
+    # container sees SENTRY_DSN as unset and skips Sentry init (the app logs one
+    # startup warning in production and carries on). An empty-string entry
+    # would NOT be equivalent — that reads as "configured but blank".
+    #
+    # A DSN is a write-only ingestion endpoint, not a credential, so it lives
+    # in the task definition rather than in aws_secretsmanager_secret.app.
+    # Move it there if that ever stops being true.
+    #
+    # NOTE: setting it here does not reach the running service on its own — see
+    # the ignore_changes note on aws_ecs_service.identity below and the
+    # procedure in ops/README.md ("Landing an env or secret change").
+    environment = concat([
       { name = "NODE_ENV", value = "production" },
       { name = "PORT", value = "4001" },
       { name = "AWS_REGION", value = var.aws_region },
@@ -198,7 +211,9 @@ resource "aws_ecs_task_definition" "identity" {
       { name = "RESET_PASSWORD_URL", value = var.reset_password_url },
       { name = "VERIFY_EMAIL_URL", value = var.verify_email_url },
       { name = "LOG_LEVEL", value = var.log_level },
-    ]
+      ],
+      var.sentry_dsn == "" ? [] : [{ name = "SENTRY_DSN", value = var.sentry_dsn }]
+    )
 
     secrets = [
       { name = "DATABASE_URL", valueFrom = "${aws_secretsmanager_secret.database.arn}:DATABASE_URL::" },
@@ -233,6 +248,35 @@ resource "aws_ecs_service" "identity" {
   desired_count   = var.desired_count
   launch_type     = "FARGATE"
 
+  # The container CMD runs `prisma migrate deploy` before `node dist/index.js`
+  # (see Dockerfile), so a fresh task does not listen on 4001 for the first few
+  # seconds — longer if a migration is pending. Grace defaults to 0, which means
+  # the ALB target group starts health-checking immediately, fails the booting
+  # task, and ECS kills it before it can serve; deploys flap and a slow
+  # migration looks like a crash loop. 180s covers migrate + boot with headroom
+  # and matches hollis-workouts-server, which has the same migrate-on-start
+  # shape. The grace period only suppresses health-check-based task kills during
+  # startup; it does not delay the ALB from routing once a task is healthy.
+  health_check_grace_period_seconds = 180
+
+  # Because migrations run at container start, a bad migration or a boot-time
+  # crash shows up as tasks that never reach steady state. Without this block
+  # ECS retries forever: the deploy crash-loops until deploy.yml's
+  # `wait-for-service-stability` times out (20 minutes) and the bad task
+  # definition stays as the service's desired revision, so every replacement
+  # task keeps failing. With it, ECS gives up after the failure threshold and
+  # rolls the service back to the last deployment that reached steady state,
+  # while the ALB keeps serving the previous healthy tasks throughout.
+  #
+  # Interaction with deploy.yml: a circuit-breaker rollback can leave
+  # desiredCount at 0, which the deploy action reads as "stable". The
+  # "Ensure desired count >= 1" step in .github/workflows/deploy.yml exists for
+  # exactly this and restores it to 2.
+  deployment_circuit_breaker {
+    enable   = true
+    rollback = true
+  }
+
   # Tasks run in the PUBLIC subnets with a public IP (egress via the VPC IGW),
   # mirroring how hollis-prod-api runs. The private subnets have no NAT/VPC
   # endpoints, so tasks placed there cannot reach Secrets Manager / ECR. The
@@ -256,6 +300,15 @@ resource "aws_ecs_service" "identity" {
     # revision this state last recorded. platform_version LATEST is resolved by
     # Fargate to a concrete version, which would otherwise be perpetual drift.
     # Matches hollis-health-app modules/ecs and modules/ecs-web-admin.
+    #
+    # TRAP: because `task_definition` is ignored, editing `environment`,
+    # `secrets`, `cpu` or `memory` in aws_ecs_task_definition.identity above and
+    # running `terraform apply` registers a NEW revision that the running
+    # service never adopts — and the next CI deploy clones the LIVE task
+    # definition, so the change is silently dropped again. The landing
+    # procedure is in ops/README.md ("Landing an env or secret change"). The
+    # deployment settings below (grace period, circuit breaker) are service
+    # attributes, not task-definition attributes, so they DO apply immediately.
     ignore_changes = [desired_count, task_definition, platform_version]
   }
 

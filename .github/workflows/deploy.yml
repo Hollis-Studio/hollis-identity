@@ -15,6 +15,14 @@
 # remove it. Create the environment with NO required reviewers for automatic
 # deploys on push to main.
 #
+# Gate 2: the `checks` job below calls .github/workflows/checks.yml (typecheck,
+# build, tests against a Postgres service container) and `deploy` needs it. It
+# is a reusable-workflow call rather than a `workflow_run` trigger so both jobs
+# stay in ONE workflow graph on ONE commit — `workflow_run` would re-resolve the
+# ref, drop the path filters and change the OIDC subject the deploy job presents.
+# A manual `workflow_dispatch` re-deploy of an already-built tag skips the gate
+# on purpose: an emergency rollback must not be blocked by a red test suite.
+#
 # Task definition / env / secrets are NOT managed by this workflow. It renders
 # the CURRENTLY-DEPLOYED task definition and swaps only the image, so any env
 # (e.g. GOOGLE_CLIENT_ID) and secrets stay exactly as the live task def has them.
@@ -68,11 +76,25 @@ permissions:
   contents: read
 
 jobs:
+  # Shared with .github/workflows/ci.yml — see checks.yml.
+  # Skipped for workflow_dispatch so an emergency rollback to an existing image
+  # tag is never gated on the test suite.
+  checks:
+    if: github.event_name == 'push'
+    uses: ./.github/workflows/checks.yml
+    secrets: inherit
+
   deploy:
     name: Build and Deploy
     runs-on: ubuntu-22.04
+    needs: [checks]
     # Block workflow_dispatch from non-main refs; only deploy from main.
-    if: github.ref == 'refs/heads/main'
+    # `!cancelled()` + the explicit result test is required because `needs` on a
+    # skipped job would otherwise skip this job too on workflow_dispatch.
+    if: >-
+      !cancelled()
+      && github.ref == 'refs/heads/main'
+      && (needs.checks.result == 'success' || needs.checks.result == 'skipped')
     environment: production
 
     steps:

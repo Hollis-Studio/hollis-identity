@@ -1,0 +1,75 @@
+# ==============================================================================
+# Dependabot — hollis-identity
+# ==============================================================================
+#
+# Nothing refreshed this repo's dependencies or its SHA-pinned base image
+# automatically before this file existed. The Dockerfile pin in particular
+# only moves when someone re-resolves it by hand, which is how the image ended
+# up running an end-of-life Node 20 base.
+#
+# Grouped on purpose: one PR per ecosystem per week instead of a dozen. Isaac
+# reviews and merges these himself, so PR volume is the limiting factor.
+#
+# The npm updates need GitHub Packages auth for the @hollis-studio scope.
+# Dependabot cannot read the repo's NODE_AUTH_TOKEN Actions secret — it needs
+# its own credential, added once under
+# Settings → Secrets and variables → Dependabot as NPM_PKG_TOKEN, and
+# referenced by the `registries` block below. Without it, npm PRs will open but
+# fail to resolve @hollis-studio/contracts.
+# ==============================================================================
+
+version: 2
+
+registries:
+  github-packages:
+    type: npm-registry
+    url: https://npm.pkg.github.com
+    token: ${{ secrets.NPM_PKG_TOKEN }}
+
+updates:
+  - package-ecosystem: npm
+    directory: "/"
+    registries:
+      - github-packages
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: America/Chicago
+    open-pull-requests-limit: 5
+    groups:
+      # @hollis-studio/contracts is published by hollis-shared and is bumped
+      # deliberately as part of a suite change, not by Dependabot.
+      production:
+        dependency-type: production
+        patterns: ["*"]
+        exclude-patterns: ["@hollis-studio/*"]
+      development:
+        dependency-type: development
+        patterns: ["*"]
+    ignore:
+      - dependency-name: "@hollis-studio/*"
+
+  - package-ecosystem: docker
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: America/Chicago
+    open-pull-requests-limit: 2
+    groups:
+      docker:
+        patterns: ["*"]
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: America/Chicago
+    open-pull-requests-limit: 2
+    groups:
+      actions:
+        patterns: ["*"]

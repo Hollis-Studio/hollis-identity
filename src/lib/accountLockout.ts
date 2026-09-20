@@ -77,8 +77,8 @@ interface LockoutEntry {
   failedAttempts: number[];
   /** Current lockout end timestamp (0 if not locked) */
   lockoutEndsAt: number;
-  /** Set of unique IP hashes that have attempted login */
-  uniqueIps: Set<string>;
+  /** Unique IP hash -> timestamp of its most recent failed attempt */
+  uniqueIps: Map<string, number>;
   /** Last update timestamp */
   lastUpdated: number;
 }
@@ -136,6 +136,83 @@ export function hashAccountEmail(email: string): string {
  */
 function hashIpAddress(ip: string): string {
   return crypto.createHash("sha256").update(ip).digest("hex").substring(0, 16); // First 16 chars sufficient
+}
+
+// ----------------------------------------------------------------------------
+// Windowed IP reputation
+// ----------------------------------------------------------------------------
+
+/**
+ * `uniqueIpCount` feeds the "many IPs targeting single account" warning, so it
+ * has to mean "distinct IPs that failed against this account *inside the failure
+ * window*". It used to mean "every IP ever seen": the set was only ever added to
+ * — never filtered by the window, and deliberately preserved across
+ * recordSuccess "for reputation" — so an account a person had simply logged into
+ * from enough networks over enough months would eventually cross
+ * maxUniqueIpsBeforeFlag and warn "distributed attack" on the next mistyped
+ * password, forever.
+ *
+ * Each IP hash is therefore stored with the timestamp of its most recent failed
+ * attempt. The Postgres column is `String[]` (AccountLockoutEntry.uniqueIpHashes),
+ * which this module cannot change without a migration, so the timestamp is
+ * appended to the hash as `"<ipHash>@<epochMs>"`. hashIpAddress() returns hex,
+ * so "@" can never occur inside the hash itself.
+ */
+const IP_STAMP_SEPARATOR = "@";
+
+/** @internal exported for tests */
+export function stampIpHash(ipHash: string, seenAtMs: number): string {
+  return `${ipHash}${IP_STAMP_SEPARATOR}${seenAtMs}`;
+}
+
+/**
+ * Collapse stored entries to the IP hashes seen inside the window, keeping each
+ * hash's most recent timestamp.
+ *
+ * Rows written before stamping existed carry no timestamp and so cannot be
+ * attributed to any window; they are dropped rather than counted, which both
+ * keeps the warning honest and lets the column self-heal on the next write.
+ *
+ * @internal exported for tests — also used by the Postgres store below
+ */
+export function activeIpHashes(
+  entries: readonly string[],
+  windowStartMs: number,
+): Map<string, number> {
+  const active = new Map<string, number>();
+
+  for (const entry of entries) {
+    const separatorIndex = entry.lastIndexOf(IP_STAMP_SEPARATOR);
+    if (separatorIndex <= 0) continue;
+
+    const seenAtMs = Number(entry.slice(separatorIndex + 1));
+    if (!Number.isFinite(seenAtMs) || seenAtMs <= windowStartMs) continue;
+
+    const ipHash = entry.slice(0, separatorIndex);
+    const previous = active.get(ipHash);
+    if (previous === undefined || seenAtMs > previous) {
+      active.set(ipHash, seenAtMs);
+    }
+  }
+
+  return active;
+}
+
+/** Serialize a windowed IP map back into the stored `String[]` form. */
+function serializeIpHashes(active: ReadonlyMap<string, number>): string[] {
+  return [...active].map(([ipHash, seenAtMs]) => stampIpHash(ipHash, seenAtMs));
+}
+
+/** Count IP hashes in a memory-store entry that fall inside the window. */
+function countActiveIps(
+  uniqueIps: ReadonlyMap<string, number>,
+  windowStartMs: number,
+): number {
+  let count = 0;
+  for (const seenAtMs of uniqueIps.values()) {
+    if (seenAtMs > windowStartMs) count += 1;
+  }
+  return count;
 }
 
 /**
@@ -217,7 +294,7 @@ export class MemoryAccountLockoutStore implements IAccountLockoutStore {
       failedAttempts: activeFailures.length,
       lockoutEndsAt: entry.lockoutEndsAt,
       retryAfterSeconds,
-      uniqueIpCount: entry.uniqueIps.size,
+      uniqueIpCount: countActiveIps(entry.uniqueIps, windowStart),
     };
   }
 
@@ -236,7 +313,7 @@ export class MemoryAccountLockoutStore implements IAccountLockoutStore {
       entry = {
         failedAttempts: [],
         lockoutEndsAt: 0,
-        uniqueIps: new Set(),
+        uniqueIps: new Map(),
         lastUpdated: now,
       };
       this.store.set(accountKey, entry);
@@ -248,9 +325,15 @@ export class MemoryAccountLockoutStore implements IAccountLockoutStore {
       (ts) => ts > windowStart,
     );
 
+    // Drop IPs whose last failure fell out of the window, so the reputation
+    // signal below describes the window and not the account's whole history.
+    for (const [seenIpHash, seenAtMs] of entry.uniqueIps) {
+      if (seenAtMs <= windowStart) entry.uniqueIps.delete(seenIpHash);
+    }
+
     // Add this failure
     entry.failedAttempts.push(now);
-    entry.uniqueIps.add(ipHash);
+    entry.uniqueIps.set(ipHash, now);
     entry.lastUpdated = now;
 
     // Calculate and apply lockout if threshold exceeded
@@ -299,7 +382,9 @@ export class MemoryAccountLockoutStore implements IAccountLockoutStore {
       entry.failedAttempts = [];
       entry.lockoutEndsAt = 0;
       entry.lastUpdated = Date.now();
-      // Keep uniqueIps for reputation tracking
+      // Keep uniqueIps for reputation tracking — each hash carries the time of
+      // its last failure, so anything older than the window stops counting on
+      // its own and a successful login no longer preserves a stale flag.
     }
   }
 
@@ -371,13 +456,19 @@ export class DatabaseAccountLockoutStore implements IAccountLockoutStore {
 
     const windowStart = now - config.failureWindowSeconds * 1000;
     const activeFailures = entry.failedAttempts.filter((ts) => ts.getTime() > windowStart);
+    const activeIps = activeIpHashes(entry.uniqueIpHashes, windowStart);
     const lockoutEndsAt = entry.lockoutEndsAt?.getTime() ?? 0;
     const isLocked = lockoutEndsAt > now;
 
-    if (activeFailures.length !== entry.failedAttempts.length) {
+    const failuresChanged = activeFailures.length !== entry.failedAttempts.length;
+    const ipsChanged = activeIps.size !== entry.uniqueIpHashes.length;
+    if (failuresChanged || ipsChanged) {
       await prisma.accountLockoutEntry.update({
         where: { accountKey },
-        data: { failedAttempts: activeFailures },
+        data: {
+          ...(failuresChanged ? { failedAttempts: activeFailures } : {}),
+          ...(ipsChanged ? { uniqueIpHashes: serializeIpHashes(activeIps) } : {}),
+        },
       });
     }
 
@@ -386,7 +477,7 @@ export class DatabaseAccountLockoutStore implements IAccountLockoutStore {
       failedAttempts: activeFailures.length,
       lockoutEndsAt,
       retryAfterSeconds: isLocked ? Math.ceil((lockoutEndsAt - now) / 1000) : 0,
-      uniqueIpCount: entry.uniqueIpHashes.length,
+      uniqueIpCount: activeIps.size,
     };
   }
 
@@ -409,7 +500,11 @@ export class DatabaseAccountLockoutStore implements IAccountLockoutStore {
         ...(existing?.failedAttempts ?? []).filter((ts) => ts.getTime() > windowStart),
         now,
       ];
-      const uniqueIpHashes = Array.from(new Set([...(existing?.uniqueIpHashes ?? []), ipHash]));
+      // Re-stamp the window's IPs and record this attempt's IP at `now`, so the
+      // stored array only ever holds hashes still inside the failure window.
+      const activeIps = activeIpHashes(existing?.uniqueIpHashes ?? [], windowStart);
+      activeIps.set(ipHash, nowMs);
+      const uniqueIpHashes = serializeIpHashes(activeIps);
       const lockoutDuration = calculateLockoutDuration(failedAttempts.length, config);
       const lockoutEndsAt = lockoutDuration > 0
         ? new Date(nowMs + lockoutDuration * 1000)

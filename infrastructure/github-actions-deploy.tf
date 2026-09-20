@@ -5,8 +5,8 @@
 # OIDC-assumed role that lets `.github/workflows/deploy.yml` push images to the
 # Identity ECR repo and roll the Identity ECS service. It has NO
 # infrastructure-provisioning permissions — that stays with a human running
-# `terraform apply` (this repo keeps Terraform state LOCAL, so infra/env changes
-# are applied from a developer machine, never from CI).
+# `terraform apply` from a workstation, never from CI. State lives in the shared
+# S3 backend (see versions.tf), not on one machine.
 #
 # The GitHub OIDC provider already exists in this account (created for
 # hollis-health-app), so we reference it via a data source rather than create a
@@ -110,21 +110,37 @@ resource "aws_iam_role_policy" "github_actions_deploy" {
         ]
         Resource = aws_ecr_repository.identity.arn
       },
-      # ECS rollout. RegisterTaskDefinition cannot be resource-scoped; the rest
-      # are read/update operations the deploy workflow performs.
+      # ECS read + task-definition registration. RegisterTaskDefinition and
+      # DescribeTaskDefinition do not support resource-level permissions at all
+      # (task definition families are not valid resources for them), and the
+      # Describe*/ListTasks calls are read-only, so these stay on "*".
       {
-        Sid    = "ECSDeploy"
+        Sid    = "ECSReadAndRegister"
         Effect = "Allow"
         Action = [
           "ecs:RegisterTaskDefinition",
           "ecs:DescribeTaskDefinition",
-          "ecs:UpdateService",
           "ecs:DescribeServices",
           "ecs:DescribeClusters",
           "ecs:ListTasks",
           "ecs:DescribeTasks"
         ]
         Resource = "*"
+      },
+      # The one mutating ECS call, scoped to the Identity service only.
+      # Previously this sat in the "*" statement above, which let a compromised
+      # CI run roll ANY service in the account — including hollis-prod-api and
+      # hollis-prod-web-admin — to an arbitrary task definition.
+      #
+      # The service ARN must carry the cluster segment
+      # (service/<cluster>/<service>); the short service/<name> form silently
+      # matches nothing. Built from the data source so it tracks the real
+      # cluster rather than a hardcoded name.
+      {
+        Sid      = "ECSUpdateIdentityServiceOnly"
+        Effect   = "Allow"
+        Action   = "ecs:UpdateService"
+        Resource = "arn:aws:ecs:${var.aws_region}:${data.aws_caller_identity.current.account_id}:service/${var.ecs_cluster_name}/${local.name}"
       },
       # PassRole — only the two roles the task definition actually uses.
       {

@@ -29,6 +29,27 @@ function buildResetUrl(token: string): string {
   return url.toString();
 }
 
+/**
+ * Print a reset/verification link for the developer running the service locally.
+ *
+ * These links are single-use bearer credentials: whoever reads one owns the
+ * account. They therefore never go through `logger` — pino redacts `resetUrl`
+ * and `verifyUrl` (see lib/logger.ts) precisely so a future caller cannot
+ * reintroduce the leak — and they are written straight to stdout instead, which
+ * in local development is the developer's own terminal.
+ *
+ * Belt and braces: production can no longer reach console delivery at all,
+ * because validateEnvOnStartup() refuses to boot with EMAIL_PROVIDER=console
+ * when NODE_ENV=production. The NODE_ENV guard here stays anyway, so a code path
+ * that bypasses startup validation (a script, a test harness) still cannot print
+ * a live link into a production log stream.
+ */
+function writeLocalOnlyLink(kind: string, url: string): void {
+  const env = getEnv();
+  if (env.NODE_ENV === "production") return;
+  process.stdout.write(`[email:console] ${kind} link: ${url}\n`);
+}
+
 export type VerificationSourceApp = string;
 
 export function buildVerifyUrl(
@@ -59,9 +80,10 @@ export async function sendPasswordResetEmail(params: {
 
   if (env.EMAIL_PROVIDER === "console") {
     logger.info(
-      { email: params.email, resetUrl, expiresAt: params.expiresAt },
+      { expiresAt: params.expiresAt },
       "Password reset email console delivery",
     );
+    writeLocalOnlyLink("password reset", resetUrl);
     return;
   }
 
@@ -105,9 +127,10 @@ export async function sendEmailVerificationEmail(params: {
 
   if (env.EMAIL_PROVIDER === "console") {
     logger.info(
-      { email: params.email, verifyUrl, expiresAt: params.expiresAt },
+      { expiresAt: params.expiresAt },
       "Email verification console delivery",
     );
+    writeLocalOnlyLink("email verification", verifyUrl);
     return;
   }
 

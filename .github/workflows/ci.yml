@@ -1,0 +1,34 @@
+# ==============================================================================
+# Identity CI
+# ==============================================================================
+#
+# Runs the shared check suite (.github/workflows/checks.yml) on every pull
+# request and every push to main.
+#
+# Why both, when deploy.yml already gates itself on the same reusable workflow:
+# deploy.yml only triggers on pushes that touch app/build paths. A push that
+# changes infrastructure/, ops/, docs/ or src/__tests__/ never starts a deploy,
+# so without this workflow those commits would land on main with no checks at
+# all. The overlap on app-path pushes to main is one duplicated ~2-minute run.
+# ==============================================================================
+
+name: Identity CI
+
+on:
+  pull_request:
+  push:
+    branches: ["main"]
+
+concurrency:
+  group: ci-identity-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    name: Checks
+    uses: ./.github/workflows/checks.yml
+    # NODE_AUTH_TOKEN (read:packages) is needed by `npm ci` for @hollis-studio.
+    secrets: inherit

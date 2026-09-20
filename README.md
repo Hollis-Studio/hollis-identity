@@ -2,7 +2,7 @@
 
 Standalone authentication and identity service for the Hollis suite. Handles user registration, login, MFA, password reset, OAuth account linking, JWT issuance, and token revocation for all Hollis apps (Health, Workouts, and future apps).
 
-**Stack:** Express 5.2.1 + Prisma 7.6 + PostgreSQL + Node 20 + ECS Fargate
+**Stack:** Express 5.2.1 + Prisma 7.6 + PostgreSQL + Node 22 + ECS Fargate
 
 ---
 
@@ -22,16 +22,20 @@ Key responsibilities:
 
 ## Current build status
 
-**Identity is deployed for the active Workouts runtime and remains in hardening.** Local checks (`npm run typecheck`, `npm run build`, `npm test`) cover the current codebase, but remaining production-hardening work still includes broader DB-backed route coverage, JWKS/auth-client hardening, SES/DNS evidence, and a formal security review.
+**Identity is deployed for the active Workouts runtime and remains in hardening.** Local checks (`npm run typecheck`, `npm run build`, `npm test`) cover the current codebase, but remaining production-hardening work still includes broader DB-backed route coverage, JWKS/auth-client hardening, a secrets escrow, and a formal security review. DNS, ACM and SES are live and verified.
 
-**Shared package state:** this repo consumes `@hollis-studio/contracts@0.2.0-alpha.42` from GitHub Packages. The previous sibling `file:../hollis-shared` install path has been removed from manifests, Docker, and lockfiles.
+**Shared package state:** this repo consumes `@hollis-studio/contracts@0.2.0-alpha.83` from GitHub Packages (the pin in `package.json` is authoritative and moves often). The previous sibling `file:../hollis-shared` install path has been removed from manifests, Docker, and lockfiles.
 
 - W6b: Repo scaffolding
 - W6c: Verbatim copy of auth services and lib files from hollis-health-app
 - **W6d (done):** Refactored all lifted files — removed Health coupling, created stubs for missing libs, `typecheck` exits 0
 - **W6f (local hardening done):** Auth/MFA routes are wired, app startup mounts CORS, request context, rate limiters, and error handling; Identity returns tokens in JSON only; `POST /verify` matches `@hollis-studio/auth-client`; token revocation state is PostgreSQL-backed; account lockout enforcement is wired into login; password reset email can send via SES; Terraform IaC validates and plans AWS resources.
+- **W6h (deployed):** Identity runs in production at `identity.hollis.health` on the shared ALB and ECS cluster; all committed migrations are applied (the container applies them at start); DNS, ACM and SES are live. Verified 2026-09-20.
 - W6g (pending): Health app cutover to Identity Service tokens.
-- W6h (pending): Live AWS deployment, migrations, DNS/ACM/SES verification, full DB-backed route matrix, auth-client hardening, consumer app integration.
+- W6h remainder (pending): full DB-backed route matrix, auth-client JWKS hardening, and a secrets escrow (`docs/SECRETS-ESCROW.md`).
+
+Operational detail lives in `ops/README.md`; the AWS resource split is in
+`infrastructure/README.md`; the API/service reference is in `docs/README.md`.
 
 ### What was changed in W6d
 
@@ -39,7 +43,7 @@ Key responsibilities:
 - `src/lib/prisma.ts`: Removed tenant isolation extension (`createTenantIsolationExtension`), switched to plain `PrismaClient`
 - `src/services/authService.ts`: Removed barcode format check, org status gate, `pushService` call; `organizationId` is now optional; added `aud`/`iss` JWT claims from env
 - `src/services/oauthVerificationService.ts`: Removed Health-specific fields (`tier`, `prefilledTier`, `isRegistered`, barcode registration flow)
-- `src/lib/accountLockout.ts`: Removed `ioredis`; local/test use memory, production has PostgreSQL-backed lockout state ready for login enforcement wiring
+- `src/lib/accountLockout.ts`: Removed `ioredis`; local/test use memory, production uses PostgreSQL-backed lockout state (login enforcement was wired in later — see W6f)
 - `src/middleware/errorHandler.ts`: Removed Sentry and `SessionError` references
 - New stubs created: `lib/tenantContext.ts`, `lib/AppError.ts`, `lib/metrics.ts`, `lib/formatErrorDigest.ts`, `lib/rateLimitStore.ts`, `lib/mfaAttemptTracker.ts`, `lib/encryption.ts`, `lib/buildPgPool.ts`, `constants/errorMessages.ts`, `utils/response.ts`, `types/express.d.ts`, `validation/common.ts`, `services/sessionService.ts`
 - `@hollis-studio/auth-client` removed from `package.json` (not used — Identity Service issues tokens, doesn't verify them)
@@ -47,10 +51,10 @@ Key responsibilities:
 
 ### What changed after W6d
 
-- `src/lib/jwtKeys.ts` centralizes JWT signing, verification, and JWKS export. Production requires `JWT_ALGORITHM=RS256`, `JWT_PRIVATE_KEY`, and `JWT_KEY_ID`; local/test can use HS256.
+- `src/lib/jwtKeys.ts` centralizes JWT signing, verification, and JWKS export. **Production runs `JWT_ALGORITHM=HS256`** (set in `infrastructure/ecs.tf`); `src/lib/env.ts` accepts either algorithm in production, requiring `JWT_SECRET` ≥ 32 chars for HS256 or `JWT_PRIVATE_KEY` + `JWT_KEY_ID` for RS256.
 - `prisma/schema.prisma` now includes database-backed `AccessTokenDenylistEntry`, `UserTokenDenylistEntry`, and `AccountLockoutEntry` models for horizontal ECS scaling.
 - `src/services/emailService.ts` sends password reset email through SES when `EMAIL_PROVIDER=ses`; console delivery remains for local/dev.
-- `infrastructure/` contains Terraform for ECR, VPC, ALB, ECS Fargate, RDS Postgres, Secrets Manager, CloudWatch logs, and WAF.
+- `infrastructure/` contains Terraform that **joins shared suite infrastructure**: it creates the ECR repo, the ECS task definition and service on the shared `hollis-prod-cluster`, an additive target group + listener rule on the shared `hollis-prod-alb`, two Secrets Manager secrets, a CloudWatch log group, six CloudWatch alarms and the OIDC deploy role. It does **not** own a VPC, ALB, RDS instance or WAF — an earlier standalone design did, and those resources were removed. See `infrastructure/README.md`.
 - `ops/ecs-task-def.json` was removed; ECS task definitions are generated by Terraform.
 
 ### Identity-specific extraction decisions
@@ -58,7 +62,7 @@ Key responsibilities:
 - Identity is cookie-agnostic. It never sets or clears auth cookies; consumers own cookie posture and mobile clients store JSON token responses.
 - Access tokens emit suite audiences and `claims.hollisHealth.{role, organizationId}` for Health compatibility during cutover.
 - `/v1/auth/verify` remains available, and root `POST /verify` matches the current `@hollis-studio/auth-client` remote verification shape.
-- `/.well-known/jwks.json` publishes the RS256 public key in production. HS256 mode returns an empty key set (no public key to distribute).
+- `/.well-known/jwks.json` publishes the RS256 public key when RS256 is active. Production runs HS256, so it currently returns an empty key set (no public key to distribute).
 - Production Postgres TLS verifies certificates by default; set `DATABASE_SSL_CA` when the runtime trust store does not already include the RDS CA.
 
 ### JWT verification mode for Workouts
@@ -130,7 +134,7 @@ All routes are prefixed `/v1/auth` unless noted.
 
 | Method | Path | Description |
 | ------ | ---- | ----------- |
-| `GET`  | `/.well-known/jwks.json` | RS256 public key set (empty key array in local HS256 mode). |
+| `GET`  | `/.well-known/jwks.json` | RS256 public key set. Empty key array whenever HS256 is active, which includes production. |
 | `GET`  | `/.well-known/openid-configuration` | OIDC discovery document (issuer, jwks_uri, token_endpoint, etc.). |
 | `GET`  | `/health` | Liveness probe with DB ping. Returns `{ ok, service, db }`. |
 
@@ -142,7 +146,7 @@ All routes are prefixed `/v1/auth` unless noted.
 
 **Refresh tokens** are 365-day JWTs, DB-backed (hash stored in `RefreshToken` table), and stable across ordinary refresh. `/refresh` validates the existing token and returns it unchanged with a fresh access token.
 
-**Signing:** HS256 and RS256 are both supported. JWKS is served at `/.well-known/jwks.json` (empty key set in HS256 mode). RS256 verification uses the public key derived from `JWT_PRIVATE_KEY` unless `JWT_PUBLIC_KEY` is explicitly set.
+**Signing:** HS256 and RS256 are both supported; **production runs HS256**. JWKS is served at `/.well-known/jwks.json` (empty key set in HS256 mode). RS256 verification uses the public key derived from `JWT_PRIVATE_KEY` unless `JWT_PUBLIC_KEY` is explicitly set.
 
 **Revocation:** Individual access token JTIs are denylisted in the `AccessTokenDenylistEntry` table. A user-level watermark (`UserTokenDenylistEntry`) is written on password reset/change to invalidate all active access tokens for that user without enumerating them. Refresh tokens are revoked in the `RefreshToken` table.
 
@@ -174,10 +178,10 @@ set +a
 
 | Variable             | Required | Description                                                                                      |
 | -------------------- | -------- | ------------------------------------------------------------------------------------------------ |
-| `JWT_ALGORITHM`      | no | `RS256` in production; `HS256` for local/test (default `HS256`)                             |
-| `JWT_PRIVATE_KEY`    | prod | PEM private key for RS256 signing. Required when `JWT_ALGORITHM=RS256`.                     |
+| `JWT_ALGORITHM`      | no | `HS256` (the production value, set in `infrastructure/ecs.tf`) or `RS256`; default `HS256`   |
+| `JWT_PRIVATE_KEY`    | RS256 only | PEM private key for RS256 signing. Unused in production (HS256), but still present in the app secret as a fallback. |
 | `JWT_PUBLIC_KEY`     | no | Optional PEM public key for RS256 verification/JWKS. Derived from `JWT_PRIVATE_KEY` if omitted. |
-| `JWT_KEY_ID`         | prod | Key ID published in JWKS (`kid`). Required when `JWT_ALGORITHM=RS256`.                      |
+| `JWT_KEY_ID`         | RS256 only | Key ID published in JWKS (`kid`). Unused in production (HS256).                     |
 | `JWT_ISSUER`         | no | `iss` claim placed in every JWT (e.g. `https://identity.hollis.health`).                    |
 | `JWT_AUDIENCES`      | no | Comma-separated valid audiences (e.g. `hollis-health,hollis-workouts`). Defaults to all audiences from `@hollis-studio/contracts`. |
 
@@ -248,7 +252,26 @@ Uses `@hollis-studio/contracts` from GitHub Packages. Local development and cont
 //npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}
 ```
 
-Container builds install directly from GitHub Packages through a BuildKit npmrc secret; they no longer clone or copy `hollis-shared`.
+Container builds install directly from GitHub Packages through a BuildKit npmrc
+secret; they no longer clone or copy `hollis-shared`. **The secret must be a
+real npmrc with a literal token** — the two lines above with
+`${NODE_AUTH_TOKEN}` expanded. Two files in this repo look like candidates and
+neither works: the committed `./.npmrc` references `${NODE_AUTH_TOKEN}`, which
+is unset inside the build sandbox, and `.env.npm.local` is an env-var file
+(`NODE_AUTH_TOKEN=…`), which npm reads as unknown config keys. Both produce
+`npm error code E401 … authentication token not provided`. CI writes a correct
+file to `/tmp/npmrc-ci` from the `NODE_AUTH_TOKEN` Actions secret; keep a local
+one at `~/.config/hollis/npmrc-with-token` (mode 600).
+
+```bash
+DOCKER_BUILDKIT=1 docker build \
+  --secret id=npmrc,src="$HOME/.config/hollis/npmrc-with-token" \
+  -t hollis-identity:local .
+```
+
+The image is `node:22-alpine` (SHA-pinned), runs as non-root uid 1001, and its
+CMD applies committed Prisma migrations before starting the server. See
+`ops/README.md` § "Container build".
 
 ## Local development
 

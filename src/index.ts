@@ -70,11 +70,19 @@ import { mfaRouter } from "./routes/mfa.js";
 import { errorHandler } from "./middleware/errorHandler.js";
 import {
   authSessionRateLimiter,
+  closeRateLimitStores,
   loginEmailRateLimiter,
   loginRateLimiter,
+  sensitiveRateLimiter,
+  verifyRateLimiter,
 } from "./middleware/rateLimit.js";
 import { prisma } from "./lib/prisma.js";
 import { configureProxyTrust } from "./lib/proxyTrust.js";
+import {
+  startAuthRetentionCleanup,
+  stopAuthRetentionCleanup,
+} from "./services/authRetentionService.js";
+import { startRateLimitCounterSweep, stopRateLimitCounterSweep } from "./lib/rateLimitStore.js";
 
 // ============================================================================
 // Helpers
@@ -202,6 +210,12 @@ export function createApp(): express.Express {
 
   app.use("/v1/auth/login", loginRateLimiter, loginEmailRateLimiter);
   app.use("/v1/auth/register", loginRateLimiter);
+// Password-reset flow: the hourly sensitive limiter runs BEFORE the per-minute
+// authSessionRateLimiter below so a reset-token brute force cannot simply pace
+// itself under 15/minute forever. Both paths share one counter — see
+// sensitiveRateLimiter for the budget math.
+  app.use("/v1/auth/forgot-password", sensitiveRateLimiter);
+  app.use("/v1/auth/reset-password", sensitiveRateLimiter);
   app.use("/v1/auth", authSessionRateLimiter);
 
 // MFA routes: /v1/auth/mfa/* — must be mounted before /v1/auth so that
@@ -214,7 +228,9 @@ export function createApp(): express.Express {
 // JWKS endpoint is root-scoped (not under /v1/auth) per OIDC convention.
 // Production publishes RS256 public keys; local HS256 mode returns an empty key set.
   app.get("/.well-known/jwks.json", jwksHandler);
-  app.post("/verify", verifyTokenPostHandler);
+// Root /verify is the service-to-service introspection endpoint auth-client calls.
+// verifyRateLimiter is deliberately permissive (600/min/IP) — see its definition.
+  app.post("/verify", verifyRateLimiter, verifyTokenPostHandler);
 
   app.use((_req, res) => {
     res.status(404).json({ success: false, error: "Not found", code: "NOT_FOUND" });
@@ -240,6 +256,17 @@ if (env.NODE_ENV !== "test") {
     logger.info({ port }, "Hollis Identity Service started");
   });
 
+// ============================================================================
+// Background maintenance timers
+// ============================================================================
+// Both use unref'd intervals, log their own errors and are stopped in
+// gracefulShutdown. There is no cron/scheduled task in front of Identity, so
+// these are the only thing keeping the auth tables and the shared rate-limit
+// counter table from growing forever.
+
+  startAuthRetentionCleanup();
+  startRateLimitCounterSweep();
+
   server.on("error", (err: Error) => {
     logger.fatal({ err, port }, "Server failed to bind — exiting");
     process.exit(1);
@@ -253,6 +280,11 @@ if (env.NODE_ENV !== "test") {
     try {
       logger.info({ signal }, "Shutdown signal received, draining connections...");
 
+      // Stop background timers first so nothing schedules new DB work while the
+      // pool is being torn down.
+      stopAuthRetentionCleanup();
+      stopRateLimitCounterSweep();
+
       // Stop accepting new connections; wait for in-flight requests to drain.
       // Force-exit after 15 s to avoid hanging indefinitely.
       await new Promise<void>((resolve) => {
@@ -265,6 +297,12 @@ if (env.NODE_ENV !== "test") {
           clearTimeout(forceExit);
           resolve();
         });
+      });
+
+      // Release rate-limit store handles before the pool closes. Failure here
+      // must not abort the rest of the shutdown.
+      await closeRateLimitStores().catch((err: unknown) => {
+        logger.error({ err, signal }, "Failed to close rate limit stores during shutdown");
       });
 
       // Disconnect Prisma connection pool

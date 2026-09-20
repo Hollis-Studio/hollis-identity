@@ -11,7 +11,11 @@ import type {
   Store,
 } from "express-rate-limit";
 
+import { env } from "./env";
+import { logger as baseLogger } from "./logger";
 import { prismaUnsafe } from "./prisma";
+
+const logger = baseLogger.child({ module: "rateLimitStore" });
 
 export interface RateLimitStoreHealth {
   status: "healthy" | "degraded" | "unavailable";
@@ -19,6 +23,11 @@ export interface RateLimitStoreHealth {
 }
 
 const stores = new Set<PostgresRateLimitStore>();
+
+/** How often expired counter rows are swept. Matches the shortest window (1 min). */
+const SWEEP_INTERVAL_MS = 60_000;
+
+let sweepTimer: NodeJS.Timeout | null = null;
 
 type RateLimitDatabase = Pick<typeof prismaUnsafe, "$executeRaw" | "$queryRaw">;
 
@@ -40,10 +49,14 @@ export class PostgresRateLimitStore implements Store {
   }
 
   async increment(key: string): Promise<IncrementResponse> {
+    // No expired-row DELETE here on purpose. This ran a full-table scan-and-delete
+    // on EVERY rate-limited request, which is both the hottest path in the service
+    // and a write against a table every other request is upserting into. It was
+    // never needed for correctness: the ON CONFLICT branch below already restarts
+    // the window when "resetTime" has passed, so an expired row is ignored rather
+    // than trusted. Reaping it is pure garbage collection and now runs on the
+    // periodic sweep (startRateLimitCounterSweep).
     const namespacedKey = `${this.prefix}${key}`;
-    await this.database.$executeRaw`
-      DELETE FROM "RateLimitCounter" WHERE "resetTime" <= NOW()
-    `;
     const rows = await this.database.$queryRaw<
       Array<{ totalHits: number; resetTime: Date }>
     >`
@@ -87,6 +100,59 @@ export class PostgresRateLimitStore implements Store {
   }
 }
 
+/**
+ * Delete counter rows whose window has already closed.
+ *
+ * Exported so the sweep can be tested and invoked directly; production calls it
+ * from the periodic timer below.
+ *
+ * @returns number of rows deleted
+ */
+export async function sweepExpiredRateLimitCounters(
+  database: RateLimitDatabase = prismaUnsafe,
+): Promise<number> {
+  return database.$executeRaw`
+    DELETE FROM "RateLimitCounter" WHERE "resetTime" <= NOW()
+  `;
+}
+
+/**
+ * Start the periodic expired-counter sweep.
+ *
+ * Only the production Postgres store has rows to reap — dev/test use
+ * express-rate-limit's MemoryStore — so this is a no-op elsewhere rather than a
+ * minute-by-minute query against a table that may not be migrated locally.
+ *
+ * Idempotent; the timer is unref'd so it never holds the process open.
+ */
+export function startRateLimitCounterSweep(): void {
+  if (sweepTimer) return;
+  if (env.NODE_ENV !== "production") return;
+
+  sweepTimer = setInterval(() => {
+    void sweepExpiredRateLimitCounters()
+      .then((deleted) => {
+        if (deleted > 0) {
+          logger.debug({ deleted }, "Swept expired rate-limit counters");
+        }
+      })
+      .catch((err: unknown) => {
+        // A failed sweep only means stale rows linger — counters stay correct.
+        logger.error({ err }, "rateLimitStore: expired-counter sweep failed");
+      });
+  }, SWEEP_INTERVAL_MS);
+
+  sweepTimer.unref();
+}
+
+/** Stop the periodic sweep (graceful shutdown / tests). */
+export function stopRateLimitCounterSweep(): void {
+  if (sweepTimer) {
+    clearInterval(sweepTimer);
+    sweepTimer = null;
+  }
+}
+
 export async function getRateLimitStoresHealth(): Promise<RateLimitStoreHealth> {
   try {
     await prismaUnsafe.$queryRaw`SELECT 1 FROM "RateLimitCounter" LIMIT 1`;
@@ -101,6 +167,7 @@ export async function resetAllRateLimitStores(): Promise<void> {
 }
 
 export async function closeAllRateLimitStores(): Promise<void> {
+  stopRateLimitCounterSweep();
   stores.clear();
 }
 
