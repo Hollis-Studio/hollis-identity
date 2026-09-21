@@ -1,7 +1,11 @@
 # Identity secrets: single-copy risk and break-glass escrow
 
-**Status:** the risk is real and open. The escrow procedure below is a proposal
-awaiting Isaac's approval; nothing in it has been executed.
+**Status:** the risk is real and open. The escrow itself (Parts 1, 2 and 4) is
+still a proposal awaiting Isaac's approval and **nothing in those parts has been
+executed** — there is still no copy of these values outside AWS. Part 3's
+Terraform lifecycle guards have since landed in `infrastructure/main.tf` (not
+yet applied); see that section for exactly which failure modes they close and
+which they provably cannot.
 
 No secret value appears in this document, and none should ever be pasted into
 one. Everything here is designed so that values move directly from AWS into a
@@ -126,29 +130,74 @@ Run it quarterly and after any rotation. If a fingerprint changes and nobody
 intended a rotation, something overwrote the secret — investigate before the
 old value ages out of `AWSPREVIOUS`.
 
-### Part 3 — Make Terraform stop being the authority (needs review)
+### Part 3 — Make Terraform stop being the authority
 
-Recommended change, **not applied** (`main.tf` secret resources are deliberately
-untouched here):
+**Status 2026-09-20: partly LANDED IN CODE, not yet applied.** The lifecycle
+guards below are now in `infrastructure/main.tf`; `terraform validate` passes
+(scratch `init -backend=false`), `terraform fmt -check` is clean. Nothing has
+been applied to AWS — the next authorised `terraform apply` adopts them, and
+because `lifecycle` is state metadata rather than a remote attribute, adopting
+them changes no live resource.
 
-- Add `lifecycle { prevent_destroy = true }` to
-  `aws_secretsmanager_secret.app`, `aws_secretsmanager_secret.database`, and to
-  the four `random_password` resources. This turns the most likely accident
-  (item 1 and 2 above) into a plan-time error instead of a silent rewrite.
-- Add `lifecycle { ignore_changes = [secret_string] }` to
-  `aws_secretsmanager_secret_version.app`, so a regenerated `random_password`
-  can no longer overwrite the live secret even if state is lost. Secrets Manager
-  then becomes the system of record and Terraform only creates the secret once.
-- Longer term, stop generating these in Terraform at all: create the values once
-  by hand, and have Terraform read the ARN via
-  `data.aws_secretsmanager_secret`. The values then have no representation in
-  state.
+Landed:
 
-The tradeoff is explicit: `prevent_destroy` means a genuine teardown needs a
-deliberate two-step (remove the lifecycle block, then destroy), and
-`ignore_changes` means a deliberate rotation is a `put-secret-value` call rather
-than an `apply`. Both are the right way round for values whose loss is
-unrecoverable.
+- `lifecycle { prevent_destroy = true }` on the four `random_password`
+  resources, `tls_private_key.jwt`, `aws_secretsmanager_secret.app`,
+  `aws_secretsmanager_secret.database`, and
+  `aws_secretsmanager_secret_version.app`.
+- `lifecycle { ignore_changes = [secret_string] }` on
+  `aws_secretsmanager_secret_version.app`, making Secrets Manager the system of
+  record for the six app values. Safe to adopt right now: that secret still has
+  exactly one version (`AWSCURRENT`, created 2026-05-26 by this stack, never
+  changed), so state and live value agree and no legitimate pending change is
+  being suppressed.
+- Deliberately **not** `ignore_changes` on
+  `aws_secretsmanager_secret_version.database`: that value is derived from the
+  shared RDS endpoint, so Terraform must stay able to rewrite it when the
+  endpoint moves. A lost DB password is recoverable; the pepper is not.
+
+#### Honest scope — what these guards do and do not stop
+
+`prevent_destroy` and `ignore_changes` are both evaluated against a **prior
+state entry**. That is the whole limit.
+
+| Failure mode from "How this actually fails" | Closed by the guards? |
+|---|---|
+| 2. `taint` / `-replace=random_password.password_pepper` | **Yes** — plan-time error. |
+| 2. Deleting a resource block to clean up the unused RS256 material | **Yes** — plan-time error. |
+| — A regenerated value rewriting the live app secret in place | **Yes** — the diff is ignored. |
+| — `terraform destroy` of the stack | **Yes** — plan-time error. |
+| 1. Apply from an uninitialised working copy / stale local state | **No.** |
+| 3. State object deleted or corrupted | **No.** |
+| 4. Account-level loss | **No.** |
+
+With no prior state every resource is a **create**, and lifecycle
+meta-arguments have nothing to compare against: `random_password` generates
+fresh values and `aws_secretsmanager_secret_version.app` is *created*, not
+updated, so `ignore_changes` never runs. Such a run does in practice abort
+first — `CreateSecret` on an existing name returns `ResourceExistsException` —
+but that is an AWS name collision, not a guard, and it evaporates the moment
+someone `terraform import`s the secret to get past the error, because the
+version is still a create afterwards.
+
+So: **the guards close the in-state accidents and cannot close the fresh-state
+class.** Part 1 (the offline envelope) remains the only control that covers
+items 1, 3 and 4, and it is still unexecuted.
+
+#### Still open — the only terraform-level fix for the fresh-state class
+
+Stop generating these in Terraform at all: create the values once by hand and
+have Terraform read the ARN via `data.aws_secretsmanager_secret`, so they have
+no representation in state. That is a state-surgery migration (remove four
+`random_password` resources and `tls_private_key.jwt` from state, rewrite the
+ECS secret references) and needs Isaac's authorisation. Not done.
+
+The tradeoff of what did land is explicit: `prevent_destroy` means a genuine
+teardown needs a deliberate two-step (remove the lifecycle block, then
+destroy), and `ignore_changes` means a deliberate rotation is
+`aws secretsmanager put-secret-value --secret-id hollis-identity-prod/app`
+followed by a forced ECS deployment, rather than an `apply`. Both are the right
+way round for values whose loss is unrecoverable.
 
 ### Part 4 — Protect the state object
 

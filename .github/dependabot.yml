@@ -61,6 +61,24 @@ updates:
     groups:
       docker:
         patterns: ["*"]
+    ignore:
+      # The Node major is a deliberate runtime decision, not a dependency bump.
+      # The Dockerfile pins node:22-alpine by digest across all three stages and
+      # the runner adds a non-root `identity` user whose HOME layout is written
+      # for that image; a major jump changes the Alpine base, the bundled npm,
+      # and the Prisma engine's libc expectations all at once, so it has to be
+      # re-resolved and smoke-tested by hand.
+      #
+      # Dependabot PR #3 (node 22 -> 25-alpine) therefore fails by design and
+      # will keep reopening until this rule exists. Close it; do not merge it.
+      # Minor/patch digest refreshes on node:22 still come through normally,
+      # which is the security-relevant part.
+      #
+      # To take a Node major deliberately: bump the three FROM lines to the new
+      # digest by hand, confirm `npm run build` + `npm test` and a container
+      # build, then delete or widen this rule.
+      - dependency-name: "node"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: github-actions
     directory: "/"
