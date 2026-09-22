@@ -18,8 +18,10 @@ import { Router, type Request, type Response } from "express";
 import crypto from "crypto";
 import { z } from "zod";
 import { publicRegisterBodySchema } from "../validation/publicRegistration";
-import { getPublicJwks, verifyJwt } from "../lib/jwtKeys";
+import { getPublicJwks, signJwt, verifyJwt } from "../lib/jwtKeys";
+import { getLegacyAccountDeleteSunset } from "../lib/env";
 import { logger } from "../lib/logger";
+import { metrics } from "../lib/metrics";
 import { hashPassword } from "../lib/passwordHashing";
 import { prisma, type UserRole } from "../lib/prisma";
 import { runAsSystemOperation } from "../lib/tenantContext";
@@ -41,7 +43,13 @@ import {
   OAUTH_ERROR_CODE,
   OAuthError,
   verifyOAuthCredentials,
+  verifyOAuthReauthenticationProof,
 } from "../services/oauthVerificationService";
+import {
+  ACCOUNT_DELETION_GRANT_PURPOSE,
+  ACCOUNT_DELETION_GRANT_TYPE,
+  resolveAccountDeletionAuthorization,
+} from "../services/accountDeletionAuthorization";
 import * as passwordResetService from "../services/passwordResetService";
 import { PasswordResetError } from "../services/passwordResetService";
 import { createPendingMfaSession } from "../services/pendingMfaSessionService";
@@ -120,6 +128,38 @@ const changePasswordBodySchema = z.object({
   newPassword: passwordSchema,
   currentRefreshToken: z.string().optional(),
 });
+
+const accountDeletionProofSchema = z.discriminatedUnion("method", [
+  z.object({ method: z.literal("password"), currentPassword: z.string().min(1) }),
+  z.object({ method: z.literal("mfa") }),
+  z.object({
+    method: z.literal("oauth"),
+    provider: z.enum(["apple", "google"] as const),
+    idToken: z.string().min(1),
+    nonce: z.string().min(16).optional(),
+  }),
+]);
+
+const ACCOUNT_DELETE_MFA_WINDOW_MS = 10 * 60 * 1000;
+
+async function verifyAccountDeletionProof(req: Request, userId: string): Promise<boolean> {
+  const proof = accountDeletionProofSchema.safeParse(req.body);
+  if (!proof.success) return false;
+  if (proof.data.method === "password") {
+    const user = await prisma.user.findUnique({ where: { id: userId }, select: { email: true } });
+    if (!user) return false;
+    const authenticated = await authService.authenticatePasswordUser(user.email, proof.data.currentPassword, extractIp(req) ?? "unknown");
+    return authenticated.profile.uid === userId;
+  }
+  if (proof.data.method === "mfa") {
+    const verifiedAt = req.user?.mfaVerifiedAt;
+    const ageMs = verifiedAt ? Date.now() - verifiedAt : Number.POSITIVE_INFINITY;
+    return Boolean(req.user?.mfaEnabled && verifiedAt && ageMs >= 0 && ageMs <= ACCOUNT_DELETE_MFA_WINDOW_MS);
+  }
+  if (proof.data.provider === "apple" && !proof.data.nonce) return false;
+  await verifyOAuthReauthenticationProof(userId, proof.data);
+  return true;
+}
 
 // ============================================================================
 // POST /login
@@ -672,17 +712,55 @@ authRouter.post("/onboarding/reset", authenticateToken, async (req: Request, res
 // Workouts-domain data is erased separately by the Workouts server (the client
 // calls DELETE /v1/users/me before this). Idempotent: a second call for an
 // already-deleted account still returns success.
+//
+// Two-step: POST /account/deletion-authorization with a fresh proof
+// ({method:"password",currentPassword} | {method:"mfa"} within 10 min of MFA |
+// {method:"oauth",provider,idToken,nonce?}) returns a 10-minute
+// { authorization } grant; DELETE /account then requires { authorization }.
+// Legacy: a DELETE with no `authorization` field (shipped Workouts builds send
+// no body) is accepted on the access token alone until LEGACY_ACCOUNT_DELETE_SUNSET
+// (2026-12-31Z, env IDENTITY_LEGACY_ACCOUNT_DELETE_UNTIL overrides / "off"
+// disables). A present-but-invalid grant is always rejected.
 // auth-protected: requires valid access token
 // ============================================================================
 
+authRouter.post("/account/deletion-authorization", authenticateToken, async (req: Request, res: Response) => {
+  const userId = req.user?.userId;
+  if (!userId) { sendUnauthorized(res, "Authentication required"); return; }
+  try {
+    if (!await verifyAccountDeletionProof(req, userId)) {
+      sendUnauthorized(res, "Fresh authentication is required", "REAUTHENTICATION_REQUIRED"); return;
+    }
+    const authorization = signJwt({ sub: userId, type: ACCOUNT_DELETION_GRANT_TYPE, purpose: ACCOUNT_DELETION_GRANT_PURPOSE }, { expiresIn: "10m" });
+    res.json({ success: true, data: { authorization } });
+  } catch (error) {
+    if (error instanceof AuthError || error instanceof OAuthError) {
+      sendUnauthorized(res, "Fresh authentication is required", "REAUTHENTICATION_REQUIRED"); return;
+    }
+    throw error;
+  }
+});
+
 authRouter.delete("/account", authenticateToken, async (req: Request, res: Response) => {
   const userId = req.user?.userId;
-  if (!userId) {
-    sendUnauthorized(res, "Authentication required");
-    return;
-  }
-
+  if (!userId) { sendUnauthorized(res, "Authentication required"); return; }
   try {
+    const deletionAuth = resolveAccountDeletionAuthorization(req.body, userId, {
+      now: new Date(),
+      legacySunset: getLegacyAccountDeleteSunset(),
+    });
+    if (!deletionAuth.ok) {
+      sendUnauthorized(res, deletionAuth.message, "REAUTHENTICATION_REQUIRED"); return;
+    }
+    if (deletionAuth.mode === "legacy") {
+      // Shipped Workouts builds delete with no body (access token only). Track
+      // use so the window can be closed once those builds are retired.
+      logger.warn(
+        { component: "auth/delete-account", deletionAuthMode: "legacy" },
+        "Account deletion accepted without a deletion grant (legacy compatibility window)",
+      );
+      metrics.increment("auth_account_delete_legacy_grantless");
+    }
     // Deny the user's outstanding access tokens immediately so a leaked token
     // cannot keep acting on behalf of the now-deleted account. Refresh tokens are
     // removed by the cascade below, so the session can no longer be renewed.
@@ -715,6 +793,10 @@ authRouter.delete("/account", authenticateToken, async (req: Request, res: Respo
     logger.info({ component: "auth/delete-account" }, "Identity account deleted");
     res.json({ success: true, data: { ok: true } });
   } catch (error) {
+    if (error instanceof AuthError || error instanceof OAuthError) {
+      sendUnauthorized(res, "Fresh authentication is required", "REAUTHENTICATION_REQUIRED");
+      return;
+    }
     // Prisma P2025 = record not found: the account is already gone. Treat delete
     // as idempotent and report success so the client's local wipe still proceeds.
     const prismaError = error as { code?: string };

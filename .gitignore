@@ -13,3 +13,13 @@ infrastructure/*.tfplan
 # Terraform state holds secrets/ARNs — never commit it.
 infrastructure/*.tfstate
 infrastructure/*.tfstate.*
+# Terraform plans embed resolved secrets (plan files are zips — grep won't find them).
+infrastructure/tfplan*
+infrastructure/**/tfplan*
+infrastructure/**/*.tfplan
+infrastructure/**/plan.out
+infrastructure/**/*.out
+# Signing keys and cloud credentials — this repo is public.
+*.keystore
+*.jks
+service-account*.json

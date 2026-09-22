@@ -18,9 +18,9 @@
   "dependencies": {
     "@aws-sdk/client-sesv2": "^3.1049.0",
     "@hollis-studio/contracts": "0.2.0-alpha.89",
-    "@prisma/adapter-pg": "^7.8.0",
-    "@prisma/client": "^7.6.0",
-    "@sentry/node": "^10.53.1",
+    "@prisma/adapter-pg": "^7.10.0",
+    "@prisma/client": "^7.10.0",
+    "@sentry/node": "^10.75.0",
     "@types/cors": "^2.8.19",
     "@types/pg": "^8.20.0",
     "bcryptjs": "3.0.3",
@@ -32,7 +32,7 @@
     "pg": "^8.20.0",
     "pino": "^10.1.0",
     "pino-pretty": "^13.1.2",
-    "prisma": "^7.6.0",
+    "prisma": "^7.10.0",
     "zod": "4.3.6"
   },
   "devDependencies": {

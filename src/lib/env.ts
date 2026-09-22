@@ -8,6 +8,7 @@
  * - Security: BCRYPT_COST_FACTOR, ACCESS_TOKEN_DENYLIST_ENABLED, COOKIE_DOMAIN
  * - AWS/SES: AWS_REGION (for future email/SES integration)
  * - Dev/test: E2E_SECURITY_TEST, REDIS_URL
+ * - Compat: IDENTITY_LEGACY_ACCOUNT_DELETE_UNTIL (sunset for grant-less DELETE /auth/account)
  *
  * deps: zod | consumers: index.ts (startup), authService.ts, etc.
  */
@@ -105,6 +106,47 @@ const portSchema = z.coerce.number().int().min(1).max(65535);
 const dataMigrationModeFlagSchema = z.enum(["1"]).optional();
 
 // ============================================================================
+// Legacy account-deletion compatibility window
+// ============================================================================
+
+/**
+ * Until this instant, DELETE /auth/account without a deletion grant is still
+ * accepted (access token only — the pre-grant behavior). Workouts builds
+ * already in the stores/review call it with no body, after deleting their
+ * Workouts server data, so rejecting them would leave a user with lost data
+ * and a live login. Remove this window once those builds are retired.
+ */
+export const LEGACY_ACCOUNT_DELETE_SUNSET = new Date("2026-12-31T00:00:00Z");
+
+const LEGACY_ACCOUNT_DELETE_OFF_VALUES = new Set(["off", "false", "0", "disabled", "none"]);
+
+const legacyAccountDeleteUntilSchema = z
+  .string()
+  .optional()
+  .refine(
+    (val) =>
+      val === undefined ||
+      val.trim() === "" ||
+      LEGACY_ACCOUNT_DELETE_OFF_VALUES.has(val.trim().toLowerCase()) ||
+      !Number.isNaN(Date.parse(val.trim())),
+    { message: 'Must be an ISO-8601 date/time or "off"' },
+  );
+
+/**
+ * Resolve the legacy grant-less account-deletion sunset from the raw
+ * IDENTITY_LEGACY_ACCOUNT_DELETE_UNTIL value. Unset/empty → the built-in
+ * LEGACY_ACCOUNT_DELETE_SUNSET; "off" → null (window closed); ISO date → that
+ * instant (a past date also closes the window). Unparseable → closed (fail safe).
+ */
+export function resolveLegacyAccountDeleteSunset(raw: string | undefined): Date | null {
+  const value = raw?.trim();
+  if (!value) return LEGACY_ACCOUNT_DELETE_SUNSET;
+  if (LEGACY_ACCOUNT_DELETE_OFF_VALUES.has(value.toLowerCase())) return null;
+  const parsed = Date.parse(value);
+  return Number.isNaN(parsed) ? null : new Date(parsed);
+}
+
+// ============================================================================
 // Environment Schema
 // ============================================================================
 
@@ -193,6 +235,9 @@ const envSchema = z.object({
     .string()
     .default("false")
     .transform((val) => val === "true"),
+
+  // Compatibility windows
+  IDENTITY_LEGACY_ACCOUNT_DELETE_UNTIL: legacyAccountDeleteUntilSchema,
 
   // Dev/test
   DEV_ADMIN_SECRET: optionalSecretSchema,
@@ -417,6 +462,10 @@ export const env = new Proxy({} as Env, {
     return validated[prop as keyof Env];
   },
 });
+
+export function getLegacyAccountDeleteSunset(): Date | null {
+  return resolveLegacyAccountDeleteSunset(getEnv().IDENTITY_LEGACY_ACCOUNT_DELETE_UNTIL);
+}
 
 export function isEnvValidated(): boolean {
   return _validatedEnv !== null;

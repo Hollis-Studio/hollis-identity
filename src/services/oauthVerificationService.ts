@@ -193,7 +193,7 @@ export function getAppleAudiences(
 async function verifyAppleIdToken(
   idToken: string,
   rawNonce: string,
-): Promise<{ sub: string; email?: string; emailVerified?: boolean; exp: number }> {
+): Promise<{ sub: string; email?: string; emailVerified?: boolean; exp: number; authenticatedAt?: number }> {
   const env = getEnv();
   const audience = getAppleAudiences(env);
 
@@ -253,6 +253,7 @@ async function verifyAppleIdToken(
     email: typeof payload.email === "string" ? payload.email : undefined,
     emailVerified: payload.email_verified === true || payload.email_verified === "true",
     exp: payload.exp,
+    authenticatedAt: typeof payload.auth_time === "number" ? payload.auth_time : payload.iat,
   };
 }
 
@@ -267,7 +268,7 @@ const GOOGLE_ISSUER_2 = "accounts.google.com";
 async function verifyGoogleIdToken(
   idToken: string,
   rawNonce: string,
-): Promise<{ sub: string; email?: string; emailVerified?: boolean; name?: string; exp: number }> {
+): Promise<{ sub: string; email?: string; emailVerified?: boolean; name?: string; exp: number; authenticatedAt?: number }> {
   const env = getEnv();
   const expectedAudience = env.GOOGLE_CLIENT_ID;
 
@@ -331,6 +332,7 @@ async function verifyGoogleIdToken(
     emailVerified: claims.email_verified === "true" || claims.email_verified === true,
     name: typeof claims.name === "string" ? claims.name : undefined,
     exp,
+    authenticatedAt: Number(claims.auth_time ?? claims.iat) || undefined,
   };
 }
 
@@ -342,6 +344,37 @@ const PROVIDER_TO_DB: Record<OAuthProvider, OAuthProviderType> = {
   apple: "APPLE",
   google: "GOOGLE",
 };
+
+/** Verify a fresh provider credential belongs to an already-linked user.
+ * This deliberately performs no email lookup, account creation, linking, or
+ * session issuance, so it is safe as proof for destructive account actions.
+ */
+export async function verifyOAuthReauthenticationProof(
+  userId: string,
+  input: Pick<OAuthVerificationInput, "provider" | "idToken"> & { nonce?: string },
+): Promise<void> {
+  const verified = input.provider === "apple"
+    ? await verifyAppleIdToken(input.idToken, input.nonce ?? "")
+    : await verifyGoogleIdToken(input.idToken, input.nonce ?? "");
+  const nowSeconds = Date.now() / 1000;
+  if (!verified.authenticatedAt || verified.authenticatedAt > nowSeconds + 60 || nowSeconds - verified.authenticatedAt > 10 * 60) {
+    throw new OAuthError(OAUTH_ERROR_CODE.VERIFICATION_FAILED, "OAuth reauthentication is not recent");
+  }
+  await assertOAuthIdTokenUnused(input.provider, input.idToken, verified.exp);
+  const linked = await runAsSystemOperation(
+    () => prisma.oAuthAccount.findUnique({
+      where: { provider_providerUserId: {
+        provider: PROVIDER_TO_DB[input.provider],
+        providerUserId: verified.sub,
+      } },
+      select: { userId: true },
+    }),
+    { reason: "auth:oauth-reauth", userId },
+  );
+  if (!linked || linked.userId !== userId) {
+    throw new OAuthError(OAUTH_ERROR_CODE.VERIFICATION_FAILED, "OAuth reauthentication failed");
+  }
+}
 
 /**
  * Find or link a user account for the given OAuth identity.

@@ -314,6 +314,47 @@ describe("Identity HTTP auth boundary", () => {
     assert.equal(response.headers.has("set-cookie"), false);
   });
 
+  it("requires a fresh proof even with a valid account access token", async () => {
+    const { token } = generateAccessTokenWithJti("delete-proof-user", "CLIENT", null);
+    const response = await fetch(`${baseUrl}/v1/auth/account/deletion-authorization`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    assert.equal(response.status, 401);
+    assert.equal((await response.json()).code, "REAUTHENTICATION_REQUIRED");
+  });
+
+  it("rejects an expired MFA proof without touching the account", async () => {
+    const { token } = generateAccessTokenWithJti("delete-mfa-user", "CLIENT", null, {
+      mfaEnabled: true,
+      mfaVerifiedAt: Date.now() - 11 * 60 * 1000,
+    });
+    const response = await fetch(`${baseUrl}/v1/auth/account/deletion-authorization`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ method: "mfa" }),
+    });
+    assert.equal(response.status, 401);
+    assert.equal((await response.json()).code, "REAUTHENTICATION_REQUIRED");
+  });
+
+  it("rejects a deletion authorization issued for a different Identity account", async () => {
+    const { token } = generateAccessTokenWithJti("delete-owner", "CLIENT", null);
+    const authorization = jwt.sign(
+      { sub: "different-owner", type: "account_deletion", purpose: "delete_identity_account" },
+      TEST_JWT_SECRET,
+      { algorithm: "HS256", expiresIn: "10m" },
+    );
+    const response = await fetch(`${baseUrl}/v1/auth/account`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ authorization }),
+    });
+    assert.equal(response.status, 401);
+    assert.equal((await response.json()).code, "REAUTHENTICATION_REQUIRED");
+  });
+
   it("requires a bearer token for the onboarding reset", async () => {
     const response = await fetch(`${baseUrl}/v1/auth/onboarding/reset`, {
       method: "POST",
