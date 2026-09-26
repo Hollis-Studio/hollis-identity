@@ -144,7 +144,7 @@ All routes are prefixed `/v1/auth` unless noted.
 
 ## Token strategy
 
-**Access tokens** are long-lived JWTs (90 days). Standard claims: `sub`, `iss`, `aud`, `exp`, `iat`, `jti`, `userId`, `role`, `organizationId`, `type` (`access`), `mfaEnabled`, `mfaVerifiedAt` (when MFA was verified). A `claims.hollisHealth.{ role, organizationId }` namespace is included for Health backward compatibility.
+**Access tokens** are long-lived JWTs (90 days). Standard claims: `sub`, `iss`, `aud`, `exp`, `iat`, `jti`, `userId`, `role`, `organizationId`, `type` (`access`), `mfaEnabled`, `mfaVerifiedAt` (when MFA was verified), `email` and `email_verified` (read from the user row at every issue, including refresh; trust `email` only when `email_verified` is true). A `claims.hollisHealth.{ role, organizationId }` namespace is included for Health backward compatibility.
 
 **Refresh tokens** are 365-day JWTs, DB-backed (hash stored in `RefreshToken` table), and stable across ordinary refresh. `/refresh` validates the existing token and returns it unchanged with a fresh access token.
 

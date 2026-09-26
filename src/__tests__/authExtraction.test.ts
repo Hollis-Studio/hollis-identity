@@ -315,7 +315,9 @@ describe("Identity HTTP auth boundary", () => {
   });
 
   it("requires a fresh proof even with a valid account access token", async () => {
-    const { token } = generateAccessTokenWithJti("delete-proof-user", "CLIENT", null);
+    const { token } = generateAccessTokenWithJti("delete-proof-user", "CLIENT", null, {
+      account: { email: "delete-proof-user@example.invalid", emailVerified: true },
+    });
     const response = await fetch(`${baseUrl}/v1/auth/account/deletion-authorization`, {
       method: "POST",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
@@ -327,6 +329,7 @@ describe("Identity HTTP auth boundary", () => {
 
   it("rejects an expired MFA proof without touching the account", async () => {
     const { token } = generateAccessTokenWithJti("delete-mfa-user", "CLIENT", null, {
+      account: { email: "delete-mfa-user@example.invalid", emailVerified: true },
       mfaEnabled: true,
       mfaVerifiedAt: Date.now() - 11 * 60 * 1000,
     });
@@ -340,7 +343,9 @@ describe("Identity HTTP auth boundary", () => {
   });
 
   it("rejects a deletion authorization issued for a different Identity account", async () => {
-    const { token } = generateAccessTokenWithJti("delete-owner", "CLIENT", null);
+    const { token } = generateAccessTokenWithJti("delete-owner", "CLIENT", null, {
+      account: { email: "delete-owner@example.invalid", emailVerified: true },
+    });
     const authorization = jwt.sign(
       { sub: "different-owner", type: "account_deletion", purpose: "delete_identity_account" },
       TEST_JWT_SECRET,

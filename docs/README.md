@@ -122,7 +122,9 @@ WebAuthn routes (`/v1/auth/mfa/webauthn/*`) are not yet implemented — tracked 
 
 ### Access token claims
 
-`sub`, `userId`, `role`, `organizationId`, `type`, `jti`, `aud`, `iss`, `iat`, `exp`, `claims.hollisHealth.{role,organizationId}`, optionally `mfaVerifiedAt`, `mfaEnabled`.
+`sub`, `userId`, `role`, `organizationId`, `type`, `jti`, `aud`, `iss`, `iat`, `exp`, `claims.hollisHealth.{role,organizationId}`, `email`, `email_verified`, optionally `mfaVerifiedAt`, `mfaEnabled`.
+
+`email` and `email_verified` (Hollis-Workouts#130) are read from the user row every time an access token is issued, refresh included, so an email change shows up on the next refresh. Consumers trust `email` only when `email_verified` is true. `mfa_pending` tokens do not carry them, and an address that fails the contracts email format is left out (logged) rather than signed.
 
 The `claims.hollisHealth` namespace preserves backward compatibility during Health cutover.
 

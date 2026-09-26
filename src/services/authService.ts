@@ -21,6 +21,7 @@ import {
 } from "@hollis-studio/contracts";
 import crypto from "crypto";
 import jwt from "jsonwebtoken";
+import { z } from "zod";
 import { USER_ERRORS } from "../constants/errorMessages";
 import { getEnv } from "../lib/env";
 import { signJwt, verifyJwt } from "../lib/jwtKeys";
@@ -116,10 +117,33 @@ export class AuthError extends Error {
 // Helper Functions
 // ============================================================================
 
-interface AccessTokenOptions {
+/**
+ * The account's current email state, signed into every access token as `email` and
+ * `email_verified` (Hollis-Workouts#130). Callers read it from the user row at issue
+ * time, never from an earlier token, so an email change shows up on the next refresh.
+ */
+export interface AccessTokenAccount {
+  email: string;
+  emailVerified: boolean;
+}
+
+type AccessTokenOptions = {
   mfaVerifiedAt?: number;
   mfaEnabled?: boolean;
-  tokenType?: AuthTokenType;
+} & (
+  | { tokenType?: typeof AUTH_TOKEN_TYPE.ACCESS; account: AccessTokenAccount }
+  | { tokenType: typeof AUTH_TOKEN_TYPE.MFA_PENDING; account?: never }
+);
+
+const emailClaimSchema = z.string().email();
+
+/** Loads the email state an access token needs, or null when the user no longer exists. */
+export async function findAccessTokenAccount(userId: string): Promise<AccessTokenAccount | null> {
+  const user = await runAsSystemOperation(
+    () => prisma.user.findUnique({ where: { id: userId }, select: { email: true, emailVerified: true } }),
+    { reason: "auth:access-token-account", userId },
+  );
+  return user ? { email: user.email, emailVerified: user.emailVerified != null } : null;
 }
 
 /**
@@ -129,7 +153,7 @@ export function generateAccessToken(
   userId: string,
   role: string,
   organizationId: string | null,
-  options?: AccessTokenOptions,
+  options: AccessTokenOptions,
 ): string {
   const { token } = generateAccessTokenWithJti(userId, role, organizationId, options);
   return token;
@@ -142,9 +166,9 @@ export function generateAccessTokenWithJti(
   userId: string,
   role: string,
   organizationId: string | null,
-  options?: AccessTokenOptions,
+  options: AccessTokenOptions,
 ): { token: string; jti: string } {
-  const { mfaVerifiedAt, mfaEnabled, tokenType = AUTH_TOKEN_TYPE.ACCESS } = options ?? {};
+  const { mfaVerifiedAt, mfaEnabled, tokenType = AUTH_TOKEN_TYPE.ACCESS, account } = options;
   const accessJti = crypto.randomUUID();
 
   const payload: Record<string, unknown> = {
@@ -174,6 +198,20 @@ export function generateAccessTokenWithJti(
 
   if (mfaEnabled !== undefined) {
     payload.mfaEnabled = mfaEnabled;
+  }
+
+  if (account) {
+    // Consumers parse claims with AccessTokenClaimsSchema (`z.string().email()`), so an
+    // address that fails it would make every consumer reject the whole token.
+    if (emailClaimSchema.safeParse(account.email).success) {
+      payload.email = account.email;
+      payload.email_verified = account.emailVerified;
+    } else {
+      logger.warn(
+        { userId, component: "authService" },
+        "[AUTH] Account email fails the claims email format; access token issued without email claims",
+      );
+    }
   }
 
   const token = signJwt(payload, {
@@ -247,6 +285,7 @@ export async function generateMfaVerifiedToken(
   userId: string,
   role: string,
   organizationId: string | null,
+  account: AccessTokenAccount,
 ): Promise<{
   idToken: string;
   refreshToken: string;
@@ -254,7 +293,11 @@ export async function generateMfaVerifiedToken(
   expiresIn: number;
 }> {
   const mfaVerifiedAt = Date.now();
-  const idToken = generateAccessToken(userId, role, organizationId, { mfaVerifiedAt, mfaEnabled: true });
+  const idToken = generateAccessToken(userId, role, organizationId, {
+    mfaVerifiedAt,
+    mfaEnabled: true,
+    account,
+  });
 
   const refreshToken = await runAsSystemOperation(
     () => issueRefreshToken(userId, role, organizationId, "MFA verification"),
@@ -313,7 +356,13 @@ export async function issueAuthenticatedSession(
     authenticatedUser.profile.uid,
     authenticatedUser.profile.role,
     authenticatedUser.profile.organizationId,
-    { mfaEnabled: authenticatedUser.mfaEnabled },
+    {
+      mfaEnabled: authenticatedUser.mfaEnabled,
+      account: {
+        email: authenticatedUser.profile.email,
+        emailVerified: authenticatedUser.profile.emailVerified,
+      },
+    },
   );
 
   const refreshToken = await runAsSystemOperation(
@@ -649,7 +698,11 @@ export async function refresh(
           decoded.userId,
           user.role,
           user.organizationId,
-          { mfaVerifiedAt: carryMfaVerifiedAt, mfaEnabled: refreshMfaEnabled },
+          {
+            mfaVerifiedAt: carryMfaVerifiedAt,
+            mfaEnabled: refreshMfaEnabled,
+            account: { email: user.email, emailVerified: user.emailVerified != null },
+          },
         );
         const expiresAt = new Date(Date.now() + ACCESS_TOKEN_EXPIRY_MS).toISOString();
         const displayName = user.displayName ?? user.email.split("@")[0];

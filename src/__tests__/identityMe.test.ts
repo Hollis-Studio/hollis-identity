@@ -58,7 +58,9 @@ function mockUser(row: UserRow): void {
 }
 
 async function getMe(): Promise<{ status: number; body: { data: Record<string, unknown> } }> {
-  const { token } = generateAccessTokenWithJti(USER_ID, "CLIENT", null);
+  const { token } = generateAccessTokenWithJti(USER_ID, "CLIENT", null, {
+    account: { email: "member@example.invalid", emailVerified: true },
+  });
   const response = await fetch(`${baseUrl}/v1/auth/me`, {
     headers: { Authorization: `Bearer ${token}` },
   });
