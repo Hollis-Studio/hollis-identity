@@ -93,7 +93,7 @@ All auth routes are mounted at `/v1/auth`. The MFA router is mounted at `/v1/aut
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/v1/auth/me` | Authenticated user profile |
+| `GET` | `/v1/auth/me` | Authenticated user profile, including `displayName` and the account-level sign-in `provider` (`password` when the account has a password, else its first-linked OAuth provider) |
 | `POST` | `/v1/auth/change-password` | Authenticated password change; revokes other sessions |
 | `POST` | `/v1/auth/biometric-token` | Issues long-TTL refresh token for mobile biometric login |
 | `POST` | `/v1/auth/verify-email/send` | Sends or resends verification email |
