@@ -26,6 +26,7 @@ import { hashPassword } from "../lib/passwordHashing";
 import { prisma, type UserRole } from "../lib/prisma";
 import { runAsSystemOperation } from "../lib/tenantContext";
 import { authenticateToken } from "../middleware/auth";
+import { resolveAccountProvider } from "../services/accountProvider";
 import * as authService from "../services/authService";
 import { AuthError } from "../services/authService";
 import { logAuthFailure } from "../lib/authFailureLogging";
@@ -616,12 +617,20 @@ authRouter.get("/me", authenticateToken, async (req: Request, res: Response) => 
       select: {
         id: true,
         email: true,
+        displayName: true,
         role: true,
         organizationId: true,
         isActive: true,
         createdAt: true,
         updatedAt: true,
         emailVerified: true,
+        // Read only to derive `provider`; never returned.
+        passwordHash: true,
+        oAuthAccounts: {
+          select: { provider: true },
+          orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+          take: 1,
+        },
       },
     });
 
@@ -640,9 +649,11 @@ authRouter.get("/me", authenticateToken, async (req: Request, res: Response) => 
     sendSuccess(res, {
       userId: user.id,
       email: user.email,
+      displayName: user.displayName || user.email.split("@")[0],
       role: user.role,
       organizationId: user.organizationId,
       emailVerified: user.emailVerified != null,
+      provider: resolveAccountProvider(user.passwordHash, user.oAuthAccounts[0]?.provider),
       onboardingResetAt,
       createdAt: user.createdAt.toISOString(),
       updatedAt: user.updatedAt.toISOString(),

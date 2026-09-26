@@ -70,7 +70,7 @@ describe("Identity extraction invariants", () => {
       "HH-TEST01",
       "CLIENT",
       "org_123",
-      { tokenType: AUTH_TOKEN_TYPE.ACCESS },
+      { tokenType: AUTH_TOKEN_TYPE.ACCESS, account: { email: "member@example.invalid", emailVerified: true } },
     );
 
     const payload = jwt.verify(token, TEST_JWT_SECRET, {
@@ -93,6 +93,7 @@ describe("Identity extraction invariants", () => {
   it("rejects tokens for the wrong audience during verification", () => {
     const { token } = generateAccessTokenWithJti("HH-TEST01", "CLIENT", null, {
       tokenType: AUTH_TOKEN_TYPE.ACCESS,
+      account: { email: "member@example.invalid", emailVerified: true },
     });
 
     assert.throws(
@@ -171,6 +172,7 @@ describe("Identity HTTP auth boundary", () => {
   it("POST /verify returns auth-client-compatible claims without setting cookies", async () => {
     const { token } = generateAccessTokenWithJti("HH-TEST02", "CLIENT", null, {
       tokenType: AUTH_TOKEN_TYPE.ACCESS,
+      account: { email: "member@example.invalid", emailVerified: true },
     });
 
     const response = await fetch(`${baseUrl}/verify`, {
@@ -203,6 +205,7 @@ describe("Identity HTTP auth boundary", () => {
   it("rejects an invalid audience query instead of silently skipping audience verification", async () => {
     const { token } = generateAccessTokenWithJti("HH-TEST02", "CLIENT", null, {
       tokenType: AUTH_TOKEN_TYPE.ACCESS,
+      account: { email: "member@example.invalid", emailVerified: true },
     });
     const response = await fetch(
       `${baseUrl}/v1/auth/verify?audience=not-a-hollis-audience`,
@@ -315,7 +318,9 @@ describe("Identity HTTP auth boundary", () => {
   });
 
   it("requires a fresh proof even with a valid account access token", async () => {
-    const { token } = generateAccessTokenWithJti("delete-proof-user", "CLIENT", null);
+    const { token } = generateAccessTokenWithJti("delete-proof-user", "CLIENT", null, {
+      account: { email: "delete-proof-user@example.invalid", emailVerified: true },
+    });
     const response = await fetch(`${baseUrl}/v1/auth/account/deletion-authorization`, {
       method: "POST",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
@@ -327,6 +332,7 @@ describe("Identity HTTP auth boundary", () => {
 
   it("rejects an expired MFA proof without touching the account", async () => {
     const { token } = generateAccessTokenWithJti("delete-mfa-user", "CLIENT", null, {
+      account: { email: "delete-mfa-user@example.invalid", emailVerified: true },
       mfaEnabled: true,
       mfaVerifiedAt: Date.now() - 11 * 60 * 1000,
     });
@@ -340,7 +346,9 @@ describe("Identity HTTP auth boundary", () => {
   });
 
   it("rejects a deletion authorization issued for a different Identity account", async () => {
-    const { token } = generateAccessTokenWithJti("delete-owner", "CLIENT", null);
+    const { token } = generateAccessTokenWithJti("delete-owner", "CLIENT", null, {
+      account: { email: "delete-owner@example.invalid", emailVerified: true },
+    });
     const authorization = jwt.sign(
       { sub: "different-owner", type: "account_deletion", purpose: "delete_identity_account" },
       TEST_JWT_SECRET,

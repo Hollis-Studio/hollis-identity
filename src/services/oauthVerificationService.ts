@@ -392,7 +392,7 @@ async function findOrLinkOAuthUser(
   userId: string;
   userRole: string;
   organizationId: string | null;
-  email: string | null;
+  email: string;
   displayName: string;
   emailVerified: boolean;
   isNewLink: boolean;
@@ -575,14 +575,17 @@ async function issueSession(
   userId: string,
   role: string,
   organizationId: string | null,
-  email: string | null,
+  email: string,
   displayName: string,
   emailVerified: boolean,
   provider: OAuthProvider,
   mfaEnabled: boolean,
   isNewUser: boolean,
 ): Promise<OAuthAuthSession> {
-  const idToken = generateAccessToken(userId, role, organizationId, { mfaEnabled });
+  const idToken = generateAccessToken(userId, role, organizationId, {
+    mfaEnabled,
+    account: { email, emailVerified },
+  });
 
   const refreshToken = await runAsSystemOperation(
     () => issueRefreshToken(userId, role, organizationId, "OAuth sign-in"),
@@ -725,7 +728,7 @@ export async function verifyOAuthCredentials(
     await createPendingMfaSession(jti, sessionToken, userId);
     return {
       mfaRequired: true, sessionToken, availableMethods: credentials.map((credential) => credential.type), expiresIn: 15 * 60,
-      user: { userId, fullName: displayName, email: email ?? "", role: userRole as MfaLoginPendingResponse["user"]["role"] },
+      user: { userId, fullName: displayName, email, role: userRole as MfaLoginPendingResponse["user"]["role"] },
     };
   }
 
