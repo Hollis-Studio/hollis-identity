@@ -17,7 +17,7 @@
   },
   "dependencies": {
     "@aws-sdk/client-sesv2": "^3.1049.0",
-    "@hollis-studio/contracts": "0.2.0-alpha.89",
+    "@hollis-studio/contracts": "0.2.0-alpha.91",
     "@prisma/adapter-pg": "^7.10.0",
     "@prisma/client": "^7.10.0",
     "@sentry/node": "^10.75.0",

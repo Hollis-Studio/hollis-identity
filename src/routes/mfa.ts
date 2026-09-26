@@ -49,6 +49,7 @@ import { authenticateToken } from "../middleware/auth.js";
 import { createStepUpToken } from "../middleware/mfa.js";
 import {
   AUTH_TOKEN_TYPE,
+  findAccessTokenAccount,
   generateMfaVerifiedToken,
 } from "../services/authService.js";
 import * as mfaService from "../services/mfaService.js";
@@ -436,14 +437,7 @@ mfaRouter.post("/login/verify", async (req: Request, res: Response) => {
       return sendBadRequest(res, "MFA verification failed");
     }
 
-    // --- Generate full session tokens with mfaVerifiedAt ---
-    const tokenResponse = await generateMfaVerifiedToken(
-      userIdToVerify,
-      userRole,
-      userOrgId,
-    );
-
-    // --- Fetch user profile for response ---
+    // --- Fetch user profile for the token's email claims and the response ---
     const user = await runAsSystemOperation(
       async () =>
         prisma.user.findUnique({
@@ -461,6 +455,14 @@ mfaRouter.post("/login/verify", async (req: Request, res: Response) => {
       );
       return sendNotFound(res, "User");
     }
+
+    // --- Generate full session tokens with mfaVerifiedAt ---
+    const tokenResponse = await generateMfaVerifiedToken(
+      userIdToVerify,
+      userRole,
+      userOrgId,
+      { email: user.email, emailVerified: user.emailVerified != null },
+    );
 
     return sendSuccess(res, {
       idToken: tokenResponse.idToken,
@@ -553,10 +555,16 @@ mfaRouter.post(
         return sendBadRequest(res, "MFA verification failed");
       }
 
+      const account = await findAccessTokenAccount(req.user.userId);
+      if (!account) {
+        return sendNotFound(res, "User");
+      }
+
       const tokenResponse = await generateMfaVerifiedToken(
         req.user.userId,
         req.user.role,
         req.user.organizationId ?? null,
+        account,
       );
 
       logger.info(

@@ -47,7 +47,10 @@ it("preserves a complete OAuth session for accounts without MFA", async () => {
   prisma.refreshToken.create = refresh as unknown as typeof prisma.refreshToken.create;
   const session = await verifyOAuthCredentials({ provider: "google", idToken: "another-synthetic-provider-token", nonce: "", state: "" });
   assert.ok("idToken" in session);
-  assert.equal((jwt.decode(session.idToken) as jwt.JwtPayload).type, "access");
+  const claims = jwt.decode(session.idToken) as jwt.JwtPayload;
+  assert.equal(claims.type, "access");
+  assert.equal(claims.email, "plain@example.invalid");
+  assert.equal(claims.email_verified, true);
   assert.equal("mfaRequired" in session, false);
   assert.equal(refresh.mock.callCount(), 1);
 });

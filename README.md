@@ -24,7 +24,7 @@ Key responsibilities:
 
 **Identity is deployed for the active Workouts runtime and remains in hardening.** Local checks (`npm run typecheck`, `npm run build`, `npm test`) cover the current codebase, but remaining production-hardening work still includes broader DB-backed route coverage, JWKS/auth-client hardening, a secrets escrow, and a formal security review. DNS, ACM and SES are live and verified.
 
-**Shared package state:** this repo consumes `@hollis-studio/contracts@0.2.0-alpha.83` from GitHub Packages (the pin in `package.json` is authoritative and moves often). The previous sibling `file:../hollis-shared` install path has been removed from manifests, Docker, and lockfiles.
+**Shared package state:** this repo consumes `@hollis-studio/contracts@0.2.0-alpha.91` from GitHub Packages (the pin in `package.json` is authoritative and moves often). The previous sibling `file:../hollis-shared` install path has been removed from manifests, Docker, and lockfiles.
 
 - W6b: Repo scaffolding
 - W6c: Verbatim copy of auth services and lib files from hollis-health-app
@@ -144,7 +144,7 @@ All routes are prefixed `/v1/auth` unless noted.
 
 ## Token strategy
 
-**Access tokens** are long-lived JWTs (90 days). Standard claims: `sub`, `iss`, `aud`, `exp`, `iat`, `jti`, `userId`, `role`, `organizationId`, `type` (`access`), `mfaEnabled`, `mfaVerifiedAt` (when MFA was verified). A `claims.hollisHealth.{ role, organizationId }` namespace is included for Health backward compatibility.
+**Access tokens** are long-lived JWTs (90 days). Standard claims: `sub`, `iss`, `aud`, `exp`, `iat`, `jti`, `userId`, `role`, `organizationId`, `type` (`access`), `mfaEnabled`, `mfaVerifiedAt` (when MFA was verified), `email` and `email_verified` (read from the user row at every issue, including refresh; trust `email` only when `email_verified` is true). A `claims.hollisHealth.{ role, organizationId }` namespace is included for Health backward compatibility.
 
 **Refresh tokens** are 365-day JWTs, DB-backed (hash stored in `RefreshToken` table), and stable across ordinary refresh. `/refresh` validates the existing token and returns it unchanged with a fresh access token.
 

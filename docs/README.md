@@ -5,7 +5,7 @@ Standalone authentication and identity service for the Hollis suite. Handles use
 **Stack:** Express 5 · Prisma 7 (adapter-pg) · PostgreSQL 16 · Node 22 · ECS Fargate · TypeScript (ESM)
 
 **Package:** `@hollis-studio/identity@0.1.0-alpha.2`  
-**Shared contracts:** `@hollis-studio/contracts@0.2.0-alpha.83` from GitHub Packages (check `package.json` — this pin moves often)
+**Shared contracts:** `@hollis-studio/contracts@0.2.0-alpha.91` from GitHub Packages (check `package.json` — this pin moves often)
 
 ---
 
@@ -93,7 +93,7 @@ All auth routes are mounted at `/v1/auth`. The MFA router is mounted at `/v1/aut
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/v1/auth/me` | Authenticated user profile |
+| `GET` | `/v1/auth/me` | Authenticated user profile, including `displayName` and the account-level sign-in `provider` (`password` when the account has a password, else its first-linked OAuth provider) |
 | `POST` | `/v1/auth/change-password` | Authenticated password change; revokes other sessions |
 | `POST` | `/v1/auth/biometric-token` | Issues long-TTL refresh token for mobile biometric login |
 | `POST` | `/v1/auth/verify-email/send` | Sends or resends verification email |
@@ -122,7 +122,9 @@ WebAuthn routes (`/v1/auth/mfa/webauthn/*`) are not yet implemented — tracked 
 
 ### Access token claims
 
-`sub`, `userId`, `role`, `organizationId`, `type`, `jti`, `aud`, `iss`, `iat`, `exp`, `claims.hollisHealth.{role,organizationId}`, optionally `mfaVerifiedAt`, `mfaEnabled`.
+`sub`, `userId`, `role`, `organizationId`, `type`, `jti`, `aud`, `iss`, `iat`, `exp`, `claims.hollisHealth.{role,organizationId}`, `email`, `email_verified`, optionally `mfaVerifiedAt`, `mfaEnabled`.
+
+`email` and `email_verified` (Hollis-Workouts#130) are read from the user row every time an access token is issued, refresh included, so an email change shows up on the next refresh. Consumers trust `email` only when `email_verified` is true. `mfa_pending` tokens do not carry them, and an address that fails the contracts email format is left out (logged) rather than signed.
 
 The `claims.hollisHealth` namespace preserves backward compatibility during Health cutover.
 
