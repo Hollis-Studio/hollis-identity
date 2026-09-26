@@ -9,17 +9,13 @@
  * for account-level questions: Change Password, deletion re-auth, signup-method
  * telemetry (hollis-workouts#129/#246).
  *
- * Mirrors IdentityAccountProvider from @hollis-studio/contracts 0.2.0-alpha.91;
- * TODO(contracts alpha.91): import that type instead of declaring it here.
- *
- * deps: contracts (OAuthProvider), prisma types, logger | consumers: routes/auth.ts
+ * deps: contracts (OAuthProvider, IdentityAccountProvider), prisma types, logger | consumers: routes/auth.ts
  */
 
 import type { OAuthProvider } from "@hollis-studio/contracts";
+import type { IdentityAccountProvider } from "@hollis-studio/contracts/domain/identity-auth";
 import { logger } from "../lib/logger";
 import type { OAuthProviderType } from "../lib/prisma";
-
-export type IdentityAccountProvider = "password" | OAuthProvider;
 
 const DB_TO_PROVIDER: Record<OAuthProviderType, OAuthProvider> = {
   APPLE: "apple",

@@ -5,7 +5,7 @@ Standalone authentication and identity service for the Hollis suite. Handles use
 **Stack:** Express 5 · Prisma 7 (adapter-pg) · PostgreSQL 16 · Node 22 · ECS Fargate · TypeScript (ESM)
 
 **Package:** `@hollis-studio/identity@0.1.0-alpha.2`  
-**Shared contracts:** `@hollis-studio/contracts@0.2.0-alpha.83` from GitHub Packages (check `package.json` — this pin moves often)
+**Shared contracts:** `@hollis-studio/contracts@0.2.0-alpha.91` from GitHub Packages (check `package.json` — this pin moves often)
 
 ---
 

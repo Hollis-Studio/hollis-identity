@@ -2,26 +2,10 @@ import assert from "node:assert/strict";
 import { after, before, beforeEach, it, mock } from "node:test";
 import type { AddressInfo } from "node:net";
 import type { Server } from "node:http";
-import { OAUTH_PROVIDERS, UserRoleSchema } from "@hollis-studio/contracts";
-import { z } from "zod";
+import { IdentityMeResponseSchema } from "@hollis-studio/contracts/domain/identity-auth";
 import { validateEnvOnStartup } from "../lib/env";
 import { prisma, type OAuthProviderType } from "../lib/prisma";
 import { generateAccessTokenWithJti } from "../services/authService";
-
-// Mirrors IdentityMeResponseSchema from @hollis-studio/contracts 0.2.0-alpha.91
-// (domain/identity-auth.ts). TODO(contracts alpha.91): import it instead.
-const IdentityMeResponseSchema = z.object({
-  userId: z.string().min(1),
-  email: z.string().min(1),
-  displayName: z.string().min(1),
-  role: UserRoleSchema,
-  organizationId: z.string().nullable(),
-  emailVerified: z.boolean(),
-  provider: z.enum(["password", ...OAUTH_PROVIDERS]),
-  onboardingResetAt: z.string().datetime().nullable(),
-  createdAt: z.string().datetime(),
-  updatedAt: z.string().datetime(),
-});
 
 const USER_ID = "me-user";
 const CREATED_AT = new Date("2026-01-02T03:04:05.000Z");

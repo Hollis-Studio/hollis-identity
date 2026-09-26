@@ -17,6 +17,7 @@ import {
   AUDIENCES,
   MFA_SESSION_WINDOW_MS,
   REVOKED_REASON,
+  type AccessTokenClaims,
   type Audience,
 } from "@hollis-studio/contracts";
 import crypto from "crypto";
@@ -204,8 +205,11 @@ export function generateAccessTokenWithJti(
     // Consumers parse claims with AccessTokenClaimsSchema (`z.string().email()`), so an
     // address that fails it would make every consumer reject the whole token.
     if (emailClaimSchema.safeParse(account.email).success) {
-      payload.email = account.email;
-      payload.email_verified = account.emailVerified;
+      const emailClaims: Pick<AccessTokenClaims, "email" | "email_verified"> = {
+        email: account.email,
+        email_verified: account.emailVerified,
+      };
+      Object.assign(payload, emailClaims);
     } else {
       logger.warn(
         { userId, component: "authService" },
