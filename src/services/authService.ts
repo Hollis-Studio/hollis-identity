@@ -132,7 +132,7 @@ type AccessTokenOptions = {
   mfaEnabled?: boolean;
 } & (
   | { tokenType?: typeof AUTH_TOKEN_TYPE.ACCESS; account: AccessTokenAccount }
-  | { tokenType: typeof AUTH_TOKEN_TYPE.MFA_PENDING; account?: never }
+  | { tokenType: Exclude<AuthTokenType, typeof AUTH_TOKEN_TYPE.ACCESS>; account?: never }
 );
 
 const emailClaimSchema = z.string().email();

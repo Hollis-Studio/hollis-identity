@@ -70,7 +70,7 @@ describe("Identity extraction invariants", () => {
       "HH-TEST01",
       "CLIENT",
       "org_123",
-      { tokenType: AUTH_TOKEN_TYPE.ACCESS },
+      { tokenType: AUTH_TOKEN_TYPE.ACCESS, account: { email: "member@example.invalid", emailVerified: true } },
     );
 
     const payload = jwt.verify(token, TEST_JWT_SECRET, {
@@ -93,6 +93,7 @@ describe("Identity extraction invariants", () => {
   it("rejects tokens for the wrong audience during verification", () => {
     const { token } = generateAccessTokenWithJti("HH-TEST01", "CLIENT", null, {
       tokenType: AUTH_TOKEN_TYPE.ACCESS,
+      account: { email: "member@example.invalid", emailVerified: true },
     });
 
     assert.throws(
@@ -171,6 +172,7 @@ describe("Identity HTTP auth boundary", () => {
   it("POST /verify returns auth-client-compatible claims without setting cookies", async () => {
     const { token } = generateAccessTokenWithJti("HH-TEST02", "CLIENT", null, {
       tokenType: AUTH_TOKEN_TYPE.ACCESS,
+      account: { email: "member@example.invalid", emailVerified: true },
     });
 
     const response = await fetch(`${baseUrl}/verify`, {
@@ -203,6 +205,7 @@ describe("Identity HTTP auth boundary", () => {
   it("rejects an invalid audience query instead of silently skipping audience verification", async () => {
     const { token } = generateAccessTokenWithJti("HH-TEST02", "CLIENT", null, {
       tokenType: AUTH_TOKEN_TYPE.ACCESS,
+      account: { email: "member@example.invalid", emailVerified: true },
     });
     const response = await fetch(
       `${baseUrl}/v1/auth/verify?audience=not-a-hollis-audience`,
