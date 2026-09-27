@@ -78,14 +78,26 @@ infra-provisioning permissions.
 
 ## Deployment
 
-Normal path: **push to `main`.** `.github/workflows/deploy.yml` builds the
-image, pushes it to ECR, clones the live task definition with only the image
-swapped, and rolls the service. It runs the shared check suite
+Normal path: **push to `main`.** `.github/workflows/deploy.yml` builds a
+**linux/arm64** image on a native arm runner (`ubuntu-24.04-arm`), pushes it to
+ECR, clones the live task definition, swaps the image, stamps the task size
+(`TASK_CPU` 256 / `TASK_MEMORY` 1024) and a `runtimePlatform` matching the
+image's architecture (ARM64 / Graviton), and rolls the service. It runs the shared check suite
 (`.github/workflows/checks.yml`) first and will not deploy if those fail.
 
 Re-deploy an already-built tag (emergency rollback) with
 `workflow_dispatch` + `image_tag`; that path intentionally skips the checks so a
-red test suite cannot block a rollback.
+red test suite cannot block a rollback. The deploy reads the tag's architecture
+from ECR, so rolling back to a pre-Graviton (amd64) tag registers an X86_64
+revision rather than crash-looping with `exec format error`; the next push to
+`main` moves the service back to ARM64.
+
+**Task size and architecture are owned by `deploy.yml`, not by the `ignore_changes`
+landing procedure below.** Change `TASK_CPU`/`TASK_MEMORY` there (and keep
+`cpu`/`memory` in `terraform.tfvars` equal so the rendered revision and alarm
+text agree). The Terraform task definition is ARM64 too, so a revision
+registered by `terraform apply` is only safe to point the service at when
+`image_tag` names an arm64 image (any tag built after the Graviton switch).
 
 ### The `ignore_changes = [task_definition]` trap
 
@@ -109,8 +121,8 @@ Two mechanisms combine:
    only if no further Terraform apply or CI deploy has registered a revision
    since, and nothing guarantees the ordering.
 
-You can see the drift today: `terraform.tfvars` sets `cpu = 512` and
-`desired_count = 2`, while the live service runs **cpu 256, desiredCount 1**.
+You can see the drift today: `terraform.tfvars` sets `desired_count = 2`,
+while the live service runs **desiredCount 1**.
 
 #### Landing an env or secret change
 
@@ -156,7 +168,11 @@ without invalidating data.
 ## Container build
 
 The Dockerfile is a three-stage build on a SHA-pinned `node:22-alpine` base and
-produces a **non-root** image (uid/gid 1001 `identity:nodejs`). It needs a
+produces a **non-root** image (uid/gid 1001 `identity:nodejs`). Production
+runs **linux/arm64** (Fargate Graviton); the pinned digest is the multi-arch
+manifest list, and the image has no native Node addons (bcryptjs is pure JS,
+Prisma uses the `pg` driver adapter), so the only arch-specific binary is the
+Prisma schema engine, which `npm ci` fetches for the build platform. It needs a
 BuildKit secret named `npmrc` for GitHub Packages access.
 
 That secret must be a real **npmrc** — scope mapping plus token:
@@ -176,7 +192,7 @@ the `NODE_AUTH_TOKEN` Actions secret; locally, keep one at
 `~/.config/hollis/npmrc-with-token` (mode 600) as the Workouts server does.
 
 ```bash
-DOCKER_BUILDKIT=1 docker build \
+DOCKER_BUILDKIT=1 docker build --platform linux/arm64 \
   --secret id=npmrc,src="$HOME/.config/hollis/npmrc-with-token" \
   -t hollis-identity:local .
 ```

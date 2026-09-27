@@ -23,7 +23,7 @@ verified against live `aws ... describe` output on 2026-09-20.
 | RDS ingress rule | `aws_security_group_rule.rds_from_identity_ecs` (`network.tf`) | one additive rule on the pre-existing `sg-072f4e44c43356914` |
 | ALB target group | `aws_lb_target_group.identity` (`ecs.tf`) | `hollis-identity-prod`, port 4001, `target_type = ip`, health check `GET /health`, 2 up / 3 down |
 | ALB listener rule | `aws_lb_listener_rule.identity_host` (`ecs.tf`) | priority **150** on the shared HTTPS listener, host `identity.hollis.health` |
-| ECS task definition | `aws_ecs_task_definition.identity` (`ecs.tf`) | family `hollis-identity-prod`, Fargate, awsvpc, container port 4001 |
+| ECS task definition | `aws_ecs_task_definition.identity` (`ecs.tf`) | family `hollis-identity-prod`, Fargate ARM64 (Graviton), 256 CPU / 1024 MiB, awsvpc, container port 4001 |
 | ECS service | `aws_ecs_service.identity` (`ecs.tf`) | `hollis-identity-prod` on the shared cluster; 180s health-check grace, deployment circuit breaker with rollback |
 | CloudWatch alarms | `monitoring.tf` | `hollis-prod-identity-*` (6 alarms) |
 | GitHub Actions deploy role | `github-actions-deploy.tf` | `hollis-identity-prod-github-actions-deploy-role` (OIDC; ECR push + roll the Identity service only) |
@@ -80,8 +80,12 @@ is actually running before applying.
 `aws_ecs_service.identity` ignores `task_definition`, `desired_count` and
 `platform_version` because CI rolls the service. Editing `environment`,
 `secrets`, `cpu` or `memory` registers a new revision that nothing adopts. The
-live drift is visible today: `terraform.tfvars` says `cpu = 512` and
-`desired_count = 2`; the service runs cpu 256, desiredCount 1. The procedure for
+live drift is visible today: `terraform.tfvars` says `desired_count = 2`; the
+service runs desiredCount 1. Task size and CPU architecture (256 CPU / 1024 MiB,
+ARM64) are stamped by `.github/workflows/deploy.yml` on every deploy; the
+`cpu`/`memory` values and `runtime_platform` here mirror it. Because the task
+definition is ARM64, `image_tag` must name an arm64 image before a
+Terraform-registered revision is pointed at by the service. The procedure for
 landing such a change is in `ops/README.md` § "Landing an env or secret change".
 
 Service-level settings (`health_check_grace_period_seconds`,
@@ -134,8 +138,8 @@ unverifiable. S3 versioning is the only recovery path today. See
 | `email_from` | string | `"noreply@hollis.health"` | Verified SES sender. |
 | `email_provider` | string | `"ses"` | `ses` or `console`; `console` is rejected by the app in production. |
 | `desired_count` | number | `2` | Task count **as rendered**; ignored on the live service (currently 1). |
-| `cpu` | number | `512` | Fargate CPU units **as rendered**; live task definition has 256. |
-| `memory` | number | `1024` | Fargate memory MiB. |
+| `cpu` | number | `256` | Fargate CPU units. Keep equal to `TASK_CPU` in `deploy.yml`, which is what the live task definition carries. |
+| `memory` | number | `1024` | Fargate memory MiB. Keep equal to `TASK_MEMORY` in `deploy.yml`. |
 | `log_level` | string | `"info"` | `LOG_LEVEL` in the container. |
 | `sentry_dsn` | string | `""` | Optional. Empty omits `SENTRY_DSN` from the task definition entirely, so Sentry stays off. |
 | `alerts_sns_topic_name` | string | `"hollis-prod-operational-alerts"` | Existing SNS topic the alarms publish to. Read only. |

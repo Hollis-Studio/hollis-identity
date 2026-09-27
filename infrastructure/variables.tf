@@ -165,9 +165,9 @@ variable "desired_count" {
 }
 
 variable "cpu" {
-  description = "Fargate task CPU units."
+  description = "Fargate task CPU units. 256 (0.25 vCPU) with 1024 MiB is a valid Fargate pairing; 14-day avg CPU was 0.3% at 512."
   type        = number
-  default     = 512
+  default     = 256
 }
 
 variable "memory" {

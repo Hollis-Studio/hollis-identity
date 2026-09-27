@@ -160,6 +160,17 @@ resource "aws_ecs_task_definition" "identity" {
   execution_role_arn       = aws_iam_role.task_execution.arn
   task_role_arn            = aws_iam_role.task.arn
 
+  # Graviton (ARM64): cheaper per vCPU/GB than x86 Fargate. The image MUST be
+  # linux/arm64 — .github/workflows/deploy.yml builds it that way and stamps
+  # the same runtimePlatform onto every revision it registers, so image arch
+  # and task arch always flip together. var.image_tag must name an arm64 image
+  # before a revision registered here is ever pointed at by the service
+  # (an x86 image on an ARM64 task exits with "exec format error").
+  runtime_platform {
+    cpu_architecture        = "ARM64"
+    operating_system_family = "LINUX"
+  }
+
   container_definitions = jsonencode([{
     name      = var.project
     image     = "${aws_ecr_repository.identity.repository_url}:${var.image_tag}"

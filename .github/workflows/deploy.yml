@@ -30,6 +30,15 @@
 # running `terraform apply` (Terraform state lives in the shared S3 backend —
 # see infrastructure/versions.tf — and CI never runs Terraform).
 #
+# Exception — task size and CPU architecture ARE stamped here. The image is
+# built for linux/arm64 (Graviton) and every revision this workflow registers
+# carries the matching runtimePlatform plus TASK_CPU/TASK_MEMORY below, so the
+# image arch and the task arch always change in the same deploy. The
+# runtimePlatform is derived from the image actually being deployed, so a
+# workflow_dispatch rollback to a pre-Graviton (amd64) tag registers an
+# X86_64 revision instead of crash-looping with "exec format error". Keep
+# TASK_CPU/TASK_MEMORY in step with infrastructure/terraform.tfvars.
+#
 # One-time setup (see infrastructure/github-actions-deploy.tf header):
 #   1. terraform apply           # creates the deploy role
 #   2. gh secret set AWS_DEPLOY_APP_ROLE_ARN -R Hollis-Studio/hollis-identity -b "$(terraform -chdir=infrastructure output -raw github_actions_deploy_role_arn)"
@@ -70,6 +79,10 @@ env:
   TASK_FAMILY: hollis-identity-prod
   CONTAINER_NAME: hollis-identity
   HEALTH_URL: https://identity.hollis.health/health
+  # Stamped onto every rendered task definition (see header). 256 CPU units
+  # with 1024 MiB is a valid Fargate pairing.
+  TASK_CPU: "256"
+  TASK_MEMORY: "1024"
 
 permissions:
   id-token: write # OIDC
@@ -86,7 +99,10 @@ jobs:
 
   deploy:
     name: Build and Deploy
-    runs-on: ubuntu-22.04
+    # Native arm64 runner so the linux/arm64 image builds without QEMU
+    # emulation. GitHub-hosted standard runner; free for this public repo and
+    # ships Docker Buildx, AWS CLI and curl.
+    runs-on: ubuntu-24.04-arm
     needs: [checks]
     # Block workflow_dispatch from non-main refs; only deploy from main.
     # `!cancelled()` + the explicit result test is required because `needs` on a
@@ -134,10 +150,11 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          # Fargate runs LINUX/X86_64 (task def runtimePlatform is unset →
-          # default). GitHub ubuntu runners are amd64, so the default build
-          # matches; pinned explicitly to prevent arch drift on runner changes.
-          platforms: linux/amd64
+          # Fargate runs this service on LINUX/ARM64 (Graviton); the
+          # "Stamp task size and CPU architecture" step below sets the task
+          # definition's runtimePlatform from this image's architecture. Pinned
+          # explicitly so a runner change cannot silently change the arch.
+          platforms: linux/arm64
           push: true
           tags: |
             ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ steps.tag.outputs.value }}
@@ -188,6 +205,39 @@ jobs:
             --task-definition "$ACTIVE_TASK_DEFINITION" \
             --query 'taskDefinition' \
             > task-definition.json
+
+      # Reads the architecture of the image being deployed (freshly built, or
+      # an existing tag on workflow_dispatch) and writes the matching
+      # runtimePlatform, plus TASK_CPU/TASK_MEMORY, into task-definition.json.
+      # This is what keeps image arch and task arch in lockstep: an arm64
+      # image never lands on an X86_64 task definition, or vice versa.
+      - name: Stamp task size and CPU architecture
+        env:
+          IMAGE: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ steps.tag.outputs.value }}
+        run: |
+          set -euo pipefail
+          # Single-platform image -> image config (has .architecture);
+          # multi-platform index -> map keyed by "os/arch".
+          IMAGE_ARCH=$(docker buildx imagetools inspect "$IMAGE" --format '{{json .Image}}' \
+            | jq -r 'if has("architecture") then .architecture
+                     elif has("linux/arm64") then "arm64"
+                     else (keys | join(",")) end')
+          case "$IMAGE_ARCH" in
+            arm64) CPU_ARCH=ARM64 ;;
+            amd64)
+              CPU_ARCH=X86_64
+              echo "::warning::${IMAGE} is amd64 (pre-Graviton tag); registering an X86_64 task definition" ;;
+            *)
+              echo "::error::Unsupported or unreadable image architecture '${IMAGE_ARCH}' for ${IMAGE}"
+              exit 1 ;;
+          esac
+          echo "Image arch ${IMAGE_ARCH} -> runtimePlatform LINUX/${CPU_ARCH}, cpu ${TASK_CPU}, memory ${TASK_MEMORY}"
+          jq --arg arch "$CPU_ARCH" --arg cpu "$TASK_CPU" --arg mem "$TASK_MEMORY" \
+            '.runtimePlatform = {cpuArchitecture: $arch, operatingSystemFamily: "LINUX"}
+             | .cpu = $cpu | .memory = $mem' \
+            task-definition.json > task-definition.stamped.json
+          mv task-definition.stamped.json task-definition.json
+          jq '{cpu, memory, runtimePlatform}' task-definition.json
 
       - name: Render task definition
         id: render
@@ -256,6 +306,7 @@ jobs:
             echo "## Deployment Summary"
             echo ""
             echo "- **Image tag:** \`${{ steps.tag.outputs.value }}\`"
+            echo "- **Task size:** ${TASK_CPU} CPU / ${TASK_MEMORY} MiB"
             echo "- **Cluster:** \`${ECS_CLUSTER}\`"
             echo "- **Service:** \`${ECS_SERVICE}\`"
             echo "- **Triggered by:** ${{ github.actor }}"
