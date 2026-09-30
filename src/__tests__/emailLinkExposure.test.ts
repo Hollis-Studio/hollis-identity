@@ -93,6 +93,7 @@ describe("EMAIL_PROVIDER=console in production", () => {
     process.env.EMAIL_PROVIDER = emailProvider;
     process.env.AWS_REGION = "us-east-1";
     process.env.RESET_PASSWORD_URL = "https://hollis.health/reset-password";
+    process.env.WORKOUTS_RESET_PASSWORD_URL = "https://workouts-api.hollis.health/reset-password";
     process.env.VERIFY_EMAIL_URL = "https://hollis.health/verify-email";
   }
 
@@ -110,6 +111,13 @@ describe("EMAIL_PROVIDER=console in production", () => {
 
     // Negative control: the failure above must come from the console provider,
     // not from some other missing production variable in this fixture.
+    assert.doesNotThrow(() => validateEnvOnStartup());
+  });
+
+  it("still starts with EMAIL_PROVIDER=ses when the Workouts reset URL is unset", () => {
+    setProductionEnv("ses");
+    delete process.env.WORKOUTS_RESET_PASSWORD_URL;
+
     assert.doesNotThrow(() => validateEnvOnStartup());
   });
 

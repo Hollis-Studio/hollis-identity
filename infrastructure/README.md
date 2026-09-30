@@ -129,6 +129,7 @@ unverifiable. S3 versioning is the only recovery path today. See
 | `certificate_arn` | string | ACM ARN | Documentation only — the certificate is already attached to the shared listener. |
 | `identity_domain_name` | string | `"identity.hollis.health"` | Host name and JWT issuer (`iss`). |
 | `reset_password_url` | string | `https://hollis.health/reset-password` | Frontend reset page used in reset emails. |
+| `workouts_reset_password_url` | string | `https://workouts-api.hollis.health/reset-password` | Reset link for requests from Hollis Workouts (`sourceApp: "workouts"`); a Workouts App Link path, so it opens the Workouts app. |
 | `verify_email_url` | string | `https://www.hollis.health/verify?type=email` | Frontend verification page used in verification emails. |
 | `cors_origins` | string | apex, www, admin | Comma-separated allowed browser origins. |
 | `jwt_audiences` | string | `"hollis-health,hollis-workouts"` | `aud` values. Must include `hollis-workouts`. |

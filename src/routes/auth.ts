@@ -13,6 +13,10 @@
  */
 
 import { AUDIENCES, type Audience, type MfaLoginPendingResponse } from "@hollis-studio/contracts";
+import {
+  IdentityForgotPasswordRequestSchema,
+  type IdentityResetPasswordResponse,
+} from "@hollis-studio/contracts/domain/identity-auth";
 import { passwordSchema } from "@hollis-studio/contracts/password";
 import { Router, type Request, type Response } from "express";
 import crypto from "crypto";
@@ -113,10 +117,6 @@ const oauthBodySchema = z.object({
     })
     .optional(),
   accessToken: z.string().optional(),
-});
-
-const forgotPasswordBodySchema = z.object({
-  email: z.string().email("Valid email required"),
 });
 
 const resetPasswordBodySchema = z.object({
@@ -907,7 +907,7 @@ authRouter.post("/oauth", async (req: Request, res: Response) => {
 // ============================================================================
 
 authRouter.post("/forgot-password", async (req: Request, res: Response) => {
-  const parseResult = forgotPasswordBodySchema.safeParse(req.body);
+  const parseResult = IdentityForgotPasswordRequestSchema.safeParse(req.body);
   if (!parseResult.success) {
     // Still return 200 to prevent enumeration — any 400 here leaks schema info.
     // Return early with ok:true to match anti-enumeration contract.
@@ -915,7 +915,7 @@ authRouter.post("/forgot-password", async (req: Request, res: Response) => {
     return;
   }
 
-  const { email } = parseResult.data;
+  const { email, sourceApp } = parseResult.data;
 
   // SECURITY: Run as system operation — email lookup is cross-tenant (requestor is unauthenticated).
   await runAsSystemOperation(
@@ -928,6 +928,7 @@ authRouter.post("/forgot-password", async (req: Request, res: Response) => {
             email,
             token: result.plainToken,
             expiresAt: result.expiresAt,
+            sourceApp,
           });
           writeAuditLog({
             eventType: "PASSWORD_RESET_REQUESTED",
@@ -951,7 +952,9 @@ authRouter.post("/forgot-password", async (req: Request, res: Response) => {
 // ============================================================================
 // POST /reset-password  — W6f-flows
 // Consumes a one-time reset token and sets a new password.
-// Revokes all refresh tokens (forces re-login on all devices).
+// Revokes all refresh tokens (forces re-login on all devices). Answers with the
+// account e-mail so the token holder can sign in through POST /login (and its
+// MFA challenge) without asking for the address again.
 // auth-public: unauthenticated; requestor uses a reset token instead of a session
 // ============================================================================
 
@@ -970,7 +973,7 @@ authRouter.post("/reset-password", async (req: Request, res: Response) => {
       try {
         // resetPassword validates the token, rehashes the password, revokes all refresh tokens,
         // and denies all active access tokens via the denylist — see passwordResetService.
-        await passwordResetService.resetPassword(token, newPassword);
+        const { email } = await passwordResetService.resetPassword(token, newPassword);
 
         writeAuditLog({
           eventType: "PASSWORD_RESET_COMPLETED",
@@ -979,7 +982,8 @@ authRouter.post("/reset-password", async (req: Request, res: Response) => {
           userAgent: req.headers["user-agent"],
         });
 
-        res.json({ success: true, data: { ok: true } });
+        const data: IdentityResetPasswordResponse = { ok: true, email };
+        res.json({ success: true, data });
       } catch (error) {
         req.log?.error({ err: error }, "Reset password error");
 

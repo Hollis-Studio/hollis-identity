@@ -469,8 +469,8 @@ Sender: `noreply@hollis.health`, region `us-east-1`. The ECS task role receives
 
 If reset or verification emails stop arriving, check in this order: SES identity
 still verified; account out of the SES sandbox; `AWS_REGION` matches the region
-holding the verified identity; `RESET_PASSWORD_URL` / `VERIFY_EMAIL_URL` point
-at frontend pages, not the Identity API.
+holding the verified identity; `RESET_PASSWORD_URL` / `WORKOUTS_RESET_PASSWORD_URL` /
+`VERIFY_EMAIL_URL` point at frontend pages, not the Identity API.
 
 ---
 

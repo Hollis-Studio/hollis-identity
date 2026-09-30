@@ -217,6 +217,10 @@ const envSchema = z.object({
   EMAIL_PROVIDER: z.enum(["console", "ses"]).default("console"),
   EMAIL_FROM: z.string().email().default("noreply@hollis.health"),
   RESET_PASSWORD_URL: urlSchema.optional(),
+  // Reset page for a forgot-password request made from Hollis Workouts
+  // (sourceApp "workouts"): a Workouts App Link / universal link path, so the
+  // e-mail opens Workouts instead of the Hollis Health app.
+  WORKOUTS_RESET_PASSWORD_URL: urlSchema.optional(),
   VERIFY_EMAIL_URL: urlSchema.optional(),
 
   // Sentry
@@ -405,6 +409,15 @@ export function validateEnvOnStartup(): void {
     }
     if (validated.EMAIL_PROVIDER === "ses" && !validated.RESET_PASSWORD_URL) {
       errors.push("EMAIL_PROVIDER=ses but RESET_PASSWORD_URL is not set.");
+    }
+    // A warning, not an error: until the task definition carries it, Workouts
+    // reset links fall back to RESET_PASSWORD_URL (the pre-existing behaviour),
+    // so shipping the code before the env change cannot take Identity down.
+    if (validated.EMAIL_PROVIDER === "ses" && !validated.WORKOUTS_RESET_PASSWORD_URL) {
+      warnings.push(
+        "WORKOUTS_RESET_PASSWORD_URL is not set — Workouts password reset links " +
+        "fall back to RESET_PASSWORD_URL and open Hollis Health instead of Workouts.",
+      );
     }
     if (validated.EMAIL_PROVIDER === "ses" && !validated.VERIFY_EMAIL_URL) {
       errors.push("EMAIL_PROVIDER=ses but VERIFY_EMAIL_URL is not set.");

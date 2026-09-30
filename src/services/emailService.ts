@@ -1,7 +1,7 @@
 /**
  * @ai-context Email Service | outbound transactional email boundary for Identity
  *
- * Sends password reset messages through SES in production. Console mode remains
+ * Sends password reset and verification messages through SES in production. Console mode remains
  * available for local development without external infrastructure.
  */
 
@@ -18,13 +18,22 @@ function getSesClient(): SESv2Client {
   return sesClient;
 }
 
-function buildResetUrl(token: string): string {
+/**
+ * Reset links open the app the request came from. A Workouts request gets the
+ * Workouts host (a Workouts App Link / universal link path) when
+ * WORKOUTS_RESET_PASSWORD_URL is set; every other request, including one with
+ * no sourceApp, keeps the suite page, which the Hollis Health app claims.
+ */
+export function buildResetUrl(token: string, sourceApp?: VerificationSourceApp): string {
   const env = getEnv();
-  if (!env.RESET_PASSWORD_URL) {
+  const baseUrl =
+    (sourceApp === "workouts" ? env.WORKOUTS_RESET_PASSWORD_URL : undefined) ??
+    env.RESET_PASSWORD_URL;
+  if (!baseUrl) {
     throw new Error("RESET_PASSWORD_URL is required to send password reset email");
   }
 
-  const url = new URL(env.RESET_PASSWORD_URL);
+  const url = new URL(baseUrl);
   url.searchParams.set("token", token);
   return url.toString();
 }
@@ -74,9 +83,10 @@ export async function sendPasswordResetEmail(params: {
   email: string;
   token: string;
   expiresAt: Date;
+  sourceApp?: VerificationSourceApp;
 }): Promise<void> {
   const env = getEnv();
-  const resetUrl = buildResetUrl(params.token);
+  const resetUrl = buildResetUrl(params.token, params.sourceApp);
 
   if (env.EMAIL_PROVIDER === "console") {
     logger.info(

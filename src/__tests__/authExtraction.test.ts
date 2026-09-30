@@ -287,6 +287,11 @@ describe("Identity HTTP auth boundary", () => {
         status: 200,
       },
       {
+        path: "/v1/auth/forgot-password",
+        body: { email: "user@example.com", sourceApp: "" },
+        status: 200,
+      },
+      {
         path: "/v1/auth/reset-password",
         body: { token: "short", newPassword: "weak" },
         status: 400,

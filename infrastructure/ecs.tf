@@ -220,6 +220,7 @@ resource "aws_ecs_task_definition" "identity" {
       { name = "EMAIL_PROVIDER", value = var.email_provider },
       { name = "EMAIL_FROM", value = var.email_from },
       { name = "RESET_PASSWORD_URL", value = var.reset_password_url },
+      { name = "WORKOUTS_RESET_PASSWORD_URL", value = var.workouts_reset_password_url },
       { name = "VERIFY_EMAIL_URL", value = var.verify_email_url },
       { name = "LOG_LEVEL", value = var.log_level },
       ],

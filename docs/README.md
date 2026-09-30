@@ -5,7 +5,7 @@ Standalone authentication and identity service for the Hollis suite. Handles use
 **Stack:** Express 5 · Prisma 7 (adapter-pg) · PostgreSQL 16 · Node 22 · ECS Fargate · TypeScript (ESM)
 
 **Package:** `@hollis-studio/identity@0.1.0-alpha.2`  
-**Shared contracts:** `@hollis-studio/contracts@0.2.0-alpha.91` from GitHub Packages (check `package.json` — this pin moves often)
+**Shared contracts:** `@hollis-studio/contracts@0.2.0-alpha.96` from GitHub Packages (check `package.json` — this pin moves often)
 
 ---
 
@@ -37,7 +37,7 @@ Production-mode hard failures at startup (`validateEnvOnStartup`, `src/lib/env.t
 
 - `JWT_ALGORITHM=HS256` (the production value) requires `JWT_SECRET` of at least 32 characters. `JWT_ALGORITHM=RS256` instead requires `JWT_PRIVATE_KEY` and `JWT_KEY_ID`. **Both algorithms are accepted in production** — there is no RS256-only rule.
 - `EMAIL_PROVIDER=console` is rejected outright (reset links would be printed rather than emailed).
-- `EMAIL_PROVIDER=ses` requires `AWS_REGION`, `RESET_PASSWORD_URL` and `VERIFY_EMAIL_URL`.
+- `EMAIL_PROVIDER=ses` requires `AWS_REGION`, `RESET_PASSWORD_URL` and `VERIFY_EMAIL_URL`. A missing `WORKOUTS_RESET_PASSWORD_URL` is only a warning: Workouts reset links then fall back to `RESET_PASSWORD_URL`.
 - `JWT_SECRET` must not contain any forbidden placeholder pattern.
 
 Warnings only (boot continues): missing `APPLE_SERVICE_ID`, `GOOGLE_CLIENT_ID` or `SENTRY_DSN`.
@@ -295,6 +295,7 @@ set -a && source .env && set +a
 | `EMAIL_PROVIDER` | No | `console` (dev) or `ses` (prod, default `console`) |
 | `EMAIL_FROM` | No | Verified sender address (default `noreply@hollis.health`) |
 | `RESET_PASSWORD_URL` | Prod/SES | Frontend reset-password page URL (not the Identity API URL) |
+| `WORKOUTS_RESET_PASSWORD_URL` | Prod/SES (warning only) | Reset link for requests from Hollis Workouts (`sourceApp: "workouts"`); falls back to `RESET_PASSWORD_URL` |
 | `VERIFY_EMAIL_URL` | Prod/SES | Frontend suite email verification page URL |
 | `AWS_REGION` | Prod/SES | AWS region for SES |
 | `REDIS_URL` | No | Deprecated; production rate limiting uses the existing Postgres database |

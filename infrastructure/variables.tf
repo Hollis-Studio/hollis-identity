@@ -105,6 +105,12 @@ variable "reset_password_url" {
   default     = "https://hollis.health/reset-password"
 }
 
+variable "workouts_reset_password_url" {
+  description = "Password reset link for requests from Hollis Workouts (sourceApp \"workouts\"). A Workouts App Link / universal link path, so the e-mail opens the Workouts app rather than Hollis Health."
+  type        = string
+  default     = "https://workouts-api.hollis.health/reset-password"
+}
+
 variable "verify_email_url" {
   description = "Suite email verification page URL used in email verification emails."
   type        = string

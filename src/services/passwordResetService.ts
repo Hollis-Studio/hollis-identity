@@ -226,12 +226,13 @@ export async function validateResetToken(
  * 4. Invalidates all active sessions (refresh tokens)
  * 5. Denies all access tokens immediately via denylist
  *
+ * @returns The account's e-mail, so the token holder can sign in with the new password.
  * @throws PasswordResetError if token is invalid
  */
 export async function resetPassword(
   token: string,
   newPassword: string,
-): Promise<void> {
+): Promise<{ email: string }> {
   const validation = await validateResetToken(token);
 
   if (!validation.valid || !validation.userId) {
@@ -251,11 +252,12 @@ export async function resetPassword(
   const passwordHash = await hashPassword(newPassword);
 
   // Transaction: update password, mark token used, revoke all sessions
-  await prisma.$transaction(async (tx) => {
+  const { email } = await prisma.$transaction(async (tx) => {
     // Update user's password
-    await tx.user.update({
+    const updated = await tx.user.update({
       where: { id: validation.userId },
       data: { passwordHash },
+      select: { email: true },
     });
 
     // Mark token as used
@@ -275,6 +277,8 @@ export async function resetPassword(
         revokedReason: REVOKED_REASON.PASSWORD_RESET,
       },
     });
+
+    return updated;
   });
 
   // Immediately deny all access tokens for this user via denylist
@@ -283,20 +287,14 @@ export async function resetPassword(
   await denyAllUserAccessTokens(validation.userId!, "password_reset");
 
   // Clear any account lockout so user can log in with new password
-  // Fetch user email for lockout key
-  const user = await prisma.user.findUnique({
-    where: { id: validation.userId },
-    select: { email: true },
-  });
-
-  if (user?.email) {
-    await clearAccountLockout(user.email);
-  }
+  await clearAccountLockout(email);
 
   logger.info(
     { userId: validation.userId },
     "Password reset completed, all sessions invalidated",
   );
+
+  return { email };
 }
 
 /**

@@ -24,7 +24,7 @@ Key responsibilities:
 
 **Identity is deployed for the active Workouts runtime and remains in hardening.** Local checks (`npm run typecheck`, `npm run build`, `npm test`) cover the current codebase, but remaining production-hardening work still includes broader DB-backed route coverage, JWKS/auth-client hardening, a secrets escrow, and a formal security review. DNS, ACM and SES are live and verified.
 
-**Shared package state:** this repo consumes `@hollis-studio/contracts@0.2.0-alpha.91` from GitHub Packages (the pin in `package.json` is authoritative and moves often). The previous sibling `file:../hollis-shared` install path has been removed from manifests, Docker, and lockfiles.
+**Shared package state:** this repo consumes `@hollis-studio/contracts@0.2.0-alpha.96` from GitHub Packages (the pin in `package.json` is authoritative and moves often). The previous sibling `file:../hollis-shared` install path has been removed from manifests, Docker, and lockfiles.
 
 - W6b: Repo scaffolding
 - W6c: Verbatim copy of auth services and lib files from hollis-health-app
@@ -212,6 +212,7 @@ set +a
 | `EMAIL_PROVIDER`     | no | `console` (default) or `ses` for AWS SES.                                                   |
 | `EMAIL_FROM`         | no | Verified sender address (default `noreply@hollis.health`).                                  |
 | `RESET_PASSWORD_URL` | prod (SES) | Frontend reset-password page URL for link construction (not the Identity API URL).      |
+| `WORKOUTS_RESET_PASSWORD_URL` | prod (SES) | Reset link for forgot-password requests with `sourceApp: "workouts"`. Example: `https://workouts-api.hollis.health/reset-password` (opens Hollis Workouts). Unset: startup warning, and those links fall back to `RESET_PASSWORD_URL`. |
 | `VERIFY_EMAIL_URL`   | prod (SES) | Frontend suite email-verification page URL. Example: `https://www.hollis.health/verify?type=email`. |
 | `AWS_REGION`         | prod (SES) | AWS region for SES when `EMAIL_PROVIDER=ses`.                                           |
 

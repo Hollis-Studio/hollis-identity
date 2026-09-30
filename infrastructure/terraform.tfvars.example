@@ -25,6 +25,7 @@ apple_web_service_id = "health.hollis.lifecoach.web"
 email_from     = "noreply@hollis.health"
 email_provider = "ses"
 reset_password_url = "https://hollis.health/reset-password"
+workouts_reset_password_url = "https://workouts-api.hollis.health/reset-password"
 verify_email_url = "https://www.hollis.health/verify?type=email"
 
 # ECS sizing

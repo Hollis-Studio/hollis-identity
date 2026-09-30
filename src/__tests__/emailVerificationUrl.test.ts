@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, describe, it } from "node:test";
-import { buildVerifyUrl } from "../services/emailService";
+import { buildResetUrl, buildVerifyUrl } from "../services/emailService";
 import { resetEnvValidation, validateEnvOnStartup } from "../lib/env";
 
 const BASE_ENV: Record<string, string> = {
@@ -15,6 +15,7 @@ const BASE_ENV: Record<string, string> = {
   PASSWORD_PEPPER: "test-pepper-that-is-long-enough-for-tests",
   VERIFY_EMAIL_URL: "https://www.hollis.health/verify?type=email",
   RESET_PASSWORD_URL: "https://hollis.health/reset-password",
+  WORKOUTS_RESET_PASSWORD_URL: "https://workouts-api.hollis.health/reset-password",
 };
 
 function configureEnv(overrides: Record<string, string | undefined> = {}): void {
@@ -74,5 +75,47 @@ describe("email verification URL construction", () => {
     assert.equal(url.pathname, "/reset-password");
     assert.equal(url.searchParams.get("token"), "token-789");
     assert.equal(url.searchParams.get("app"), "health");
+  });
+});
+
+describe("password reset URL construction", () => {
+  beforeEach(() => {
+    configureEnv();
+  });
+
+  afterEach(() => {
+    resetEnvValidation();
+  });
+
+  it("keeps the suite reset page when no source app is given", () => {
+    const url = new URL(buildResetUrl("token-abc"));
+
+    assert.equal(url.origin, "https://hollis.health");
+    assert.equal(url.pathname, "/reset-password");
+    assert.equal(url.searchParams.get("token"), "token-abc");
+  });
+
+  it("sends a Workouts request to the Workouts App Link host", () => {
+    const url = new URL(buildResetUrl("token-def", "workouts"));
+
+    assert.equal(url.origin, "https://workouts-api.hollis.health");
+    assert.equal(url.pathname, "/reset-password");
+    assert.equal(url.searchParams.get("token"), "token-def");
+    assert.equal(url.searchParams.has("app"), false);
+  });
+
+  it("keeps the suite reset page for any other source app", () => {
+    for (const sourceApp of ["health", "nutrition", "Workouts"]) {
+      const url = new URL(buildResetUrl("token-ghi", sourceApp));
+      assert.equal(url.origin, "https://hollis.health", sourceApp);
+    }
+  });
+
+  it("falls back to the suite reset page when the Workouts URL is unset", () => {
+    configureEnv({ WORKOUTS_RESET_PASSWORD_URL: undefined });
+
+    const url = new URL(buildResetUrl("token-jkl", "workouts"));
+    assert.equal(url.origin, "https://hollis.health");
+    assert.equal(url.searchParams.get("token"), "token-jkl");
   });
 });
