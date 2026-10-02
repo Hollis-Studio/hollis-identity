@@ -54,7 +54,19 @@ it("rejects a provider proof whose authentication is stale", async () => {
   }), /not recent/);
 });
 
-it("rejects a provider proof with a future authentication time", async () => {
+it("accepts a provider proof exactly at the allowed future clock-skew boundary", async (t) => {
+  // Keep both the fixture and verification on one exact clock instant. Real
+  // elapsed time must not move a boundary proof into or out of the allowed skew.
+  t.mock.method(Date, "now", () => 1_800_000_000_000);
+  mockGoogleToken("provider-future-boundary", Math.floor(Date.now() / 1000) + 60);
+  prisma.oAuthAccount.findUnique = mock.fn(async () => ({ userId: "identity-owner" })) as typeof prisma.oAuthAccount.findUnique;
+  await assert.doesNotReject(verifyOAuthReauthenticationProof("identity-owner", {
+    provider: "google", idToken: "future-boundary-provider-proof",
+  }));
+});
+
+it("rejects a provider proof beyond the allowed future clock-skew boundary", async (t) => {
+  t.mock.method(Date, "now", () => 1_800_000_000_000);
   mockGoogleToken("provider-future", Math.floor(Date.now() / 1000) + 61);
   prisma.oAuthAccount.findUnique = mock.fn(async () => ({ userId: "identity-owner" })) as typeof prisma.oAuthAccount.findUnique;
   await assert.rejects(verifyOAuthReauthenticationProof("identity-owner", {
