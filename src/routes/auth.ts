@@ -850,11 +850,10 @@ authRouter.post("/oauth", async (req: Request, res: Response) => {
 
     res.json({ success: true, data: session, ...("isNewUser" in session ? { isNewUser: session.isNewUser } : {}) });
   } catch (error) {
-    req.log?.error({ err: error, provider }, "OAuth sign-in error");
-
     if (error instanceof OAuthError) {
       switch (error.code) {
         case OAUTH_ERROR_CODE.PROVIDER_NOT_CONFIGURED:
+          req.log?.error({ err: error, provider }, "OAuth sign-in error");
           sendError(res, "OAuth sign-in is not configured on this server", 503, undefined, "OAUTH_NOT_CONFIGURED");
           return;
 
@@ -870,14 +869,17 @@ authRouter.post("/oauth", async (req: Request, res: Response) => {
           return;
 
         case OAUTH_ERROR_CODE.ACCOUNT_INACTIVE:
+          req.log?.warn({ provider, code: error.code }, "OAuth sign-in refused");
           sendUnauthorized(res, "Account is inactive");
           return;
 
         case OAUTH_ERROR_CODE.ACCOUNT_LINK_UNVERIFIED:
+          req.log?.warn({ provider, code: error.code }, "OAuth sign-in refused");
           sendConflict(res, error.message);
           return;
 
         case OAUTH_ERROR_CODE.NO_ACCOUNT_FOUND:
+          req.log?.info({ provider, code: error.code }, "OAuth account link not found");
           // Identity Service does NOT auto-register on OAuth — consumer app must invoke
           // its own registration flow when it receives this error code.
           sendError(
@@ -890,11 +892,13 @@ authRouter.post("/oauth", async (req: Request, res: Response) => {
           return;
 
         default:
+          req.log?.error({ err: error, provider }, "OAuth sign-in error");
           sendError(res, "OAuth sign-in failed", 500, undefined, "OAUTH_ERROR");
           return;
       }
     }
 
+    req.log?.error({ err: error, provider }, "OAuth sign-in error");
     sendError(res, "OAuth sign-in failed", 500, undefined, "OAUTH_ERROR");
   }
 });

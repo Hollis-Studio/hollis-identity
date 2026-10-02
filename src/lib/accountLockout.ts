@@ -463,8 +463,10 @@ export class DatabaseAccountLockoutStore implements IAccountLockoutStore {
     const failuresChanged = activeFailures.length !== entry.failedAttempts.length;
     const ipsChanged = activeIps.size !== entry.uniqueIpHashes.length;
     if (failuresChanged || ipsChanged) {
-      await prisma.accountLockoutEntry.update({
-        where: { accountKey },
+      // Cleanup must tolerate a concurrent password reset, and must not erase
+      // failures recorded after this snapshot was read.
+      await prisma.accountLockoutEntry.updateMany({
+        where: { accountKey, lastUpdated: entry.lastUpdated },
         data: {
           ...(failuresChanged ? { failedAttempts: activeFailures } : {}),
           ...(ipsChanged ? { uniqueIpHashes: serializeIpHashes(activeIps) } : {}),
@@ -543,14 +545,17 @@ export class DatabaseAccountLockoutStore implements IAccountLockoutStore {
   }
 
   async recordSuccess(accountKey: string): Promise<void> {
-    await prisma.accountLockoutEntry.update({
+    // Most successful accounts have no failure row. A zero-row update is the
+    // normal no-op; update() emits P2025 through Prisma's error listener even
+    // when its rejected promise is caught here.
+    await prisma.accountLockoutEntry.updateMany({
       where: { accountKey },
       data: { failedAttempts: [], lockoutEndsAt: null },
-    }).catch(() => undefined);
+    });
   }
 
   async clearLockout(accountKey: string): Promise<void> {
-    await prisma.accountLockoutEntry.delete({ where: { accountKey } }).catch(() => undefined);
+    await prisma.accountLockoutEntry.deleteMany({ where: { accountKey } });
   }
 
   async resetAll(): Promise<void> {
