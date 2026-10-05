@@ -115,14 +115,14 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Resolve image tag
         id: tag
         run: echo "value=${{ github.event.inputs.image_tag || github.sha }}" >> "$GITHUB_OUTPUT"
 
       - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ secrets.AWS_DEPLOY_APP_ROLE_ARN }}
           role-session-name: github-actions-deploy-identity
@@ -135,7 +135,7 @@ jobs:
       # ── Build + push (skipped when deploying an already-built tag) ──────────
       - name: Set up Docker Buildx
         if: github.event.inputs.image_tag == ''
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Prepare npm auth for Docker build
         if: github.event.inputs.image_tag == ''
@@ -147,7 +147,7 @@ jobs:
 
       - name: Build and push image
         if: github.event.inputs.image_tag == ''
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           # Fargate runs this service on LINUX/ARM64 (Graviton); the
