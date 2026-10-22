@@ -66,6 +66,7 @@ export const OAUTH_ERROR_CODE = {
   ACCOUNT_INACTIVE: "OAUTH_ACCOUNT_INACTIVE",
   NO_ACCOUNT_FOUND: "OAUTH_NO_ACCOUNT_FOUND",
   ACCOUNT_LINK_UNVERIFIED: "OAUTH_ACCOUNT_LINK_UNVERIFIED",
+  TOKEN_REUSED: "OAUTH_TOKEN_REUSED",
 } as const;
 
 export type OAuthErrorCode = (typeof OAUTH_ERROR_CODE)[keyof typeof OAUTH_ERROR_CODE];
@@ -101,6 +102,8 @@ export interface OAuthVerificationInput {
   authorizationCode?: string;
   fullName?: { givenName?: string | null; familyName?: string | null };
   accessToken?: string;
+  /** Per-install identifier from the client; binds a re-presented id_token to the install that first used it. */
+  clientInstallId?: string;
 }
 
 export interface OAuthAuthSession {
@@ -231,8 +234,8 @@ async function verifyAppleIdToken(
 
   // Verify the nonce only when the client supplied one. The Google Sign-In SDK API in
   // use cannot attach a nonce, so the flow can't hard-require it; replay protection is
-  // instead enforced uniformly via the one-time-use id_token cache in
-  // verifyOAuthCredentials. When a nonce IS provided (Apple supports it natively), bind it.
+  // instead enforced uniformly via the install-bound id_token use cache in
+  // verifyOAuthCredentials (claimOAuthIdToken). When a nonce IS provided (Apple supports it natively), bind it.
   if (rawNonce) {
     const expectedNonceHash = crypto.createHash("sha256").update(rawNonce).digest("hex");
     if (payload.nonce !== expectedNonceHash) {
@@ -310,8 +313,8 @@ async function verifyGoogleIdToken(
   // every Google login with an SDK-emitted nonce fail. We therefore only treat
   // the nonce as a positive signal: if it matches the raw value the client sent
   // (a future nonce-capable tier), great; otherwise we log and proceed. Replay
-  // is defended uniformly server-side by single-use id_token enforcement
-  // (enforceSingleUse), with audience/issuer/expiry checks guarding injection.
+  // is defended uniformly server-side by install-bound id_token use enforcement
+  // (claimOAuthIdToken), with audience/issuer/expiry checks guarding injection.
   if (claims.nonce != null) {
     if (claims.nonce === rawNonce) {
       logger.debug("Google id_token nonce bound and verified (raw match)");
@@ -351,7 +354,7 @@ const PROVIDER_TO_DB: Record<OAuthProvider, OAuthProviderType> = {
  */
 export async function verifyOAuthReauthenticationProof(
   userId: string,
-  input: Pick<OAuthVerificationInput, "provider" | "idToken"> & { nonce?: string },
+  input: Pick<OAuthVerificationInput, "provider" | "idToken" | "clientInstallId"> & { nonce?: string },
 ): Promise<void> {
   const verified = input.provider === "apple"
     ? await verifyAppleIdToken(input.idToken, input.nonce ?? "")
@@ -360,7 +363,7 @@ export async function verifyOAuthReauthenticationProof(
   if (!verified.authenticatedAt || verified.authenticatedAt > nowSeconds + 60 || nowSeconds - verified.authenticatedAt > 10 * 60) {
     throw new OAuthError(OAUTH_ERROR_CODE.VERIFICATION_FAILED, "OAuth reauthentication is not recent");
   }
-  await assertOAuthIdTokenUnused(input.provider, input.idToken, verified.exp);
+  await claimOAuthIdToken(input.provider, input.idToken, verified, input.clientInstallId);
   const linked = await runAsSystemOperation(
     () => prisma.oAuthAccount.findUnique({
       where: { provider_providerUserId: {
@@ -619,45 +622,70 @@ async function issueSession(
 // Public API
 // ============================================================================
 
+function sha256Hex(value: string): string {
+  return crypto.createHash("sha256").update(value).digest("hex");
+}
+
 /**
- * SECURITY (id_token replay): enforce single-use per OAuth id_token. The Google SDK
- * API in use cannot attach a nonce, so a captured-but-still-valid id_token could
- * otherwise be replayed against POST /oauth within its ~1h validity to mint a session.
- * We record an accept marker keyed by hash(provider, idToken) in the shared
- * (Postgres-backed, cross-instance) denylist store, TTL'd to the token's own expiry,
- * and reject any second presentation. Fail CLOSED on store errors.
+ * SECURITY (id_token replay): an OAuth id_token is single-use unless it comes
+ * back from the install that first used it. The Google SDK API in use cannot
+ * attach a nonce, so a captured-but-still-valid id_token could otherwise be
+ * replayed against POST /oauth within its ~1h validity to mint a session.
+ *
+ * Android Play Services, however, hands the SAME cached id_token to every
+ * signIn() for about an hour, even after signOut(), so strict single use locked
+ * out anyone who signed out and back in with Google within that hour. A client
+ * may therefore send a per-install `clientInstallId`. First acceptance records
+ * two markers in the shared (Postgres-backed, cross-instance) denylist store,
+ * both TTL'd to the token's own expiry:
+ *   - oauth_replay:<provider>:sha256(idToken)            the token was used
+ *   - oauth_install:<provider>:sha256(token, sub, install) who used it
+ * A re-presentation is accepted only when the token verified again (signature,
+ * audience, issuer, expiry — done by the caller) and the binding marker for the
+ * same provider, token, `sub` and install exists. Without an install id, or with
+ * a different one, it is rejected as TOKEN_REUSED. Store lookups fail CLOSED.
  */
-async function assertOAuthIdTokenUnused(
+async function claimOAuthIdToken(
   provider: OAuthProvider,
   idToken: string,
-  expSeconds: number,
+  verified: { sub: string; exp: number },
+  clientInstallId: string | undefined,
 ): Promise<void> {
-  const key = `oauth_replay:${provider}:${crypto
-    .createHash("sha256")
-    .update(idToken)
-    .digest("hex")}`;
+  const tokenHash = sha256Hex(idToken);
+  const replayKey = `oauth_replay:${provider}:${tokenHash}`;
+  const bindingKey = clientInstallId
+    ? `oauth_install:${provider}:${sha256Hex(JSON.stringify([provider, tokenHash, verified.sub, clientInstallId]))}`
+    : null;
   const store = getStore();
 
-  let alreadyUsed: boolean;
-  try {
-    alreadyUsed = await store.isTokenDenied(key);
-  } catch (err) {
-    logger.error({ err, provider }, "OAuth replay-cache lookup failed — rejecting (fail-closed)");
-    throw new OAuthError(OAUTH_ERROR_CODE.VERIFICATION_FAILED, "Unable to verify sign-in credential");
-  }
+  const isMarked = async (key: string): Promise<boolean> => {
+    try {
+      return await store.isTokenDenied(key);
+    } catch (err) {
+      logger.error({ err, provider }, "OAuth replay-cache lookup failed — rejecting (fail-closed)");
+      throw new OAuthError(OAUTH_ERROR_CODE.VERIFICATION_FAILED, "Unable to verify sign-in credential");
+    }
+  };
 
-  if (alreadyUsed) {
+  if (await isMarked(replayKey)) {
+    if (bindingKey && await isMarked(bindingKey)) {
+      logger.info({ provider }, "OAuth id_token re-presented by the install that first used it — accepted");
+      return;
+    }
     throw new OAuthError(
-      OAUTH_ERROR_CODE.NONCE_MISMATCH,
-      "OAuth id_token has already been used — possible replay attack",
+      OAUTH_ERROR_CODE.TOKEN_REUSED,
+      "OAuth id_token has already been used by another install or attempt",
     );
   }
 
-  // Persist the accept marker. Expire it when the token would naturally expire so the
-  // table self-prunes (cap the TTL defensively in case of a bogus far-future exp).
+  // Expire the markers when the token would naturally expire so the table
+  // self-prunes (cap the TTL defensively in case of a bogus far-future exp).
+  // The binding is written first: if the replay marker then fails to persist,
+  // the token is still unused, so a retry is not locked out.
   const maxTtlMs = 60 * 60 * 1000; // 1h — longer than any provider id_token lifetime
-  const expiresAt = new Date(Math.min(expSeconds * 1000, Date.now() + maxTtlMs));
-  await store.denyToken(key, expiresAt, "oauth_replay");
+  const expiresAt = new Date(Math.min(verified.exp * 1000, Date.now() + maxTtlMs));
+  if (bindingKey) await store.denyToken(bindingKey, expiresAt, "oauth_replay");
+  await store.denyToken(replayKey, expiresAt, "oauth_replay");
 }
 
 export async function verifyOAuthCredentials(
@@ -694,7 +722,7 @@ export async function verifyOAuthCredentials(
   }
 
   // Reject replays before any account lookup / session issuance.
-  await assertOAuthIdTokenUnused(provider, idToken, idTokenExp);
+  await claimOAuthIdToken(provider, idToken, { sub: identity.sub, exp: idTokenExp }, input.clientInstallId);
 
   const {
     userId,

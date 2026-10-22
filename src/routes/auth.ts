@@ -104,6 +104,13 @@ const verifyBodySchema = z.object({
 
 // W6f-flows schemas
 
+/**
+ * Optional per-install identifier (Workouts sends SHA-256 hex of an install
+ * secret). Binds a re-presented OAuth id_token to the install that first used
+ * it; clients that omit it keep strict single use.
+ */
+const clientInstallIdSchema = z.string().regex(/^[A-Za-z0-9_-]{32,128}$/, "Invalid clientInstallId").optional();
+
 const oauthBodySchema = z.object({
   provider: z.enum(["apple", "google"] as const),
   idToken: z.string().min(1, "idToken is required"),
@@ -117,6 +124,7 @@ const oauthBodySchema = z.object({
     })
     .optional(),
   accessToken: z.string().optional(),
+  clientInstallId: clientInstallIdSchema,
 });
 
 const resetPasswordBodySchema = z.object({
@@ -138,6 +146,7 @@ const accountDeletionProofSchema = z.discriminatedUnion("method", [
     provider: z.enum(["apple", "google"] as const),
     idToken: z.string().min(1),
     nonce: z.string().min(16).optional(),
+    clientInstallId: clientInstallIdSchema,
   }),
 ]);
 
@@ -745,6 +754,9 @@ authRouter.post("/account/deletion-authorization", authenticateToken, async (req
     const authorization = signJwt({ sub: userId, type: ACCOUNT_DELETION_GRANT_TYPE, purpose: ACCOUNT_DELETION_GRANT_PURPOSE }, { expiresIn: "10m" });
     res.json({ success: true, data: { authorization } });
   } catch (error) {
+    if (error instanceof OAuthError) {
+      req.log?.warn({ oauthErrorCode: error.code }, "Account deletion OAuth proof rejected");
+    }
     if (error instanceof AuthError || error instanceof OAuthError) {
       sendUnauthorized(res, "Fresh authentication is required", "REAUTHENTICATION_REQUIRED"); return;
     }
@@ -835,7 +847,7 @@ authRouter.post("/oauth", async (req: Request, res: Response) => {
     return;
   }
 
-  const { provider, idToken, nonce, csrfState, authorizationCode, fullName, accessToken } =
+  const { provider, idToken, nonce, csrfState, authorizationCode, fullName, accessToken, clientInstallId } =
     parseResult.data;
   try {
     const session = await verifyOAuthCredentials({
@@ -846,6 +858,7 @@ authRouter.post("/oauth", async (req: Request, res: Response) => {
       authorizationCode,
       fullName,
       accessToken,
+      clientInstallId,
     });
 
     res.json({ success: true, data: session, ...("isNewUser" in session ? { isNewUser: session.isNewUser } : {}) });
@@ -864,22 +877,33 @@ authRouter.post("/oauth", async (req: Request, res: Response) => {
         case OAUTH_ERROR_CODE.TOKEN_EXPIRED:
         case OAUTH_ERROR_CODE.TOKEN_DECODE_FAILED:
         case OAUTH_ERROR_CODE.EMAIL_NOT_VERIFIED:
-          req.log?.warn({ provider, code: error.code }, "OAuth id_token verification rejected");
+          req.log?.warn({ provider, oauthErrorCode: error.code }, "OAuth id_token verification rejected");
           sendBadRequest(res, "Invalid or expired authentication credential");
           return;
 
+        case OAUTH_ERROR_CODE.TOKEN_REUSED:
+          req.log?.warn({ provider, oauthErrorCode: error.code }, "OAuth id_token reuse rejected");
+          sendError(
+            res,
+            "This Google sign-in was already used. Wait a few minutes and try again.",
+            409,
+            undefined,
+            "OAUTH_TOKEN_REUSED",
+          );
+          return;
+
         case OAUTH_ERROR_CODE.ACCOUNT_INACTIVE:
-          req.log?.warn({ provider, code: error.code }, "OAuth sign-in refused");
+          req.log?.warn({ provider, oauthErrorCode: error.code }, "OAuth sign-in refused");
           sendUnauthorized(res, "Account is inactive");
           return;
 
         case OAUTH_ERROR_CODE.ACCOUNT_LINK_UNVERIFIED:
-          req.log?.warn({ provider, code: error.code }, "OAuth sign-in refused");
+          req.log?.warn({ provider, oauthErrorCode: error.code }, "OAuth sign-in refused");
           sendConflict(res, error.message);
           return;
 
         case OAUTH_ERROR_CODE.NO_ACCOUNT_FOUND:
-          req.log?.info({ provider, code: error.code }, "OAuth account link not found");
+          req.log?.info({ provider, oauthErrorCode: error.code }, "OAuth account link not found");
           // Identity Service does NOT auto-register on OAuth — consumer app must invoke
           // its own registration flow when it receives this error code.
           sendError(

@@ -108,7 +108,7 @@ All routes are prefixed `/v1/auth` unless noted.
 | `GET`  | `/verify` | public | Verifies Bearer token; returns decoded claims. Used by `@hollis-studio/auth-client` remote path. |
 | `POST` | `/verify` | public | Same as GET verify but token in body `{ token, audience? }`. Also mirrored at root `POST /verify`. |
 | `GET`  | `/me` | bearer | Returns authenticated user profile from DB. |
-| `POST` | `/oauth` | public | Apple/Google id_token sign-in. Returns 404 `OAUTH_NO_LINKED_ACCOUNT` if no link exists (consumer must register separately). |
+| `POST` | `/oauth` | public | Apple/Google id_token sign-in. Returns 404 `OAUTH_NO_LINKED_ACCOUNT` if no link exists (consumer must register separately). Each id_token is single-use unless re-sent with the optional `clientInstallId` of the install that first used it; any other reuse returns 409 `OAUTH_TOKEN_REUSED`. |
 | `POST` | `/forgot-password` | public | Initiates password reset; always returns `{ ok: true }` (anti-enumeration). |
 | `POST` | `/reset-password` | public | Consumes one-time token, sets new password, revokes all refresh tokens. |
 | `POST` | `/change-password` | bearer | Authenticated password change; revokes other sessions, keeps current one. |
