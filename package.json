@@ -9,7 +9,7 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
-    "test": "NODE_ENV=test DATABASE_URL=postgresql://test:test@localhost:5432/test JWT_SECRET=test-secret-at-least-32-characters-long ENCRYPTION_KEY=test-encryption-key-at-least-32-characters-long node --import tsx --test src/__tests__/*.test.ts",
+    "test": "NODE_ENV=test DATABASE_URL=postgresql://test:test@localhost:5432/test JWT_SECRET=test-secret-at-least-32-characters-long ENCRYPTION_KEY=$(node -p \"require('node:crypto').randomBytes(32).toString('hex')\") node --import tsx --test src/__tests__/*.test.ts",
     "typecheck": "tsc --noEmit",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
