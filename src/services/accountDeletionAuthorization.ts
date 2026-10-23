@@ -4,8 +4,8 @@
  * Current clients first obtain a short-lived deletion grant from
  * POST /auth/account/deletion-authorization (fresh password / MFA / provider
  * proof) and send it as `{ authorization }`. Workouts builds already shipped
- * send no body at all; those are accepted as "legacy" (access token only, the
- * pre-grant behavior) until the sunset from getLegacyAccountDeleteSunset().
+ * sent no body at all. Compatibility is disabled by default; an explicit
+ * bounded override may accept those as "legacy" until its configured sunset.
  * A request that DOES carry `authorization` must present a valid grant — a bad
  * grant never falls back to the legacy path.
  *

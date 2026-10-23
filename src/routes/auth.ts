@@ -17,7 +17,7 @@ import {
   IdentityForgotPasswordRequestSchema,
   type IdentityResetPasswordResponse,
 } from "@hollis-studio/contracts/domain/identity-auth";
-import { passwordSchema } from "@hollis-studio/contracts/password";
+import { passwordSchema, validatePassword } from "@hollis-studio/contracts/password";
 import { Router, type Request, type Response } from "express";
 import crypto from "crypto";
 import { z } from "zod";
@@ -314,6 +314,8 @@ authRouter.post("/register", async (req: Request, res: Response) => {
       return;
     }
 
+    const passwordPolicy = await validatePassword(password, { userInputs: [email] });
+    if (!passwordPolicy.valid) { sendBadRequest(res, passwordPolicy.error ?? "Password does not meet security requirements"); return; }
     const passwordHash = await hashPassword(password);
     // crypto.randomUUID() is Node 14.17+ built-in — no extra dependency needed
     const id = crypto.randomUUID();
@@ -737,10 +739,8 @@ authRouter.post("/onboarding/reset", authenticateToken, async (req: Request, res
 // ({method:"password",currentPassword} | {method:"mfa"} within 10 min of MFA |
 // {method:"oauth",provider,idToken,nonce?}) returns a 10-minute
 // { authorization } grant; DELETE /account then requires { authorization }.
-// Legacy: a DELETE with no `authorization` field (shipped Workouts builds send
-// no body) is accepted on the access token alone until LEGACY_ACCOUNT_DELETE_SUNSET
-// (2026-12-31Z, env IDENTITY_LEGACY_ACCOUNT_DELETE_UNTIL overrides / "off"
-// disables). A present-but-invalid grant is always rejected.
+// Legacy requests without `authorization` are refused by default. Only an
+// explicit bounded IDENTITY_LEGACY_ACCOUNT_DELETE_UNTIL override permits them.
 // auth-protected: requires valid access token
 // ============================================================================
 
@@ -994,6 +994,8 @@ authRouter.post("/reset-password", async (req: Request, res: Response) => {
   }
 
   const { token, newPassword } = parseResult.data;
+  const passwordPolicy = await validatePassword(newPassword);
+  if (!passwordPolicy.valid) { sendBadRequest(res, passwordPolicy.error ?? "Password does not meet security requirements"); return; }
 
   // SECURITY: System operation — token lookup is cross-tenant; userId unknown until token resolves.
   await runAsSystemOperation(
@@ -1047,6 +1049,8 @@ authRouter.post("/change-password", authenticateToken, async (req: Request, res:
   }
 
   const { currentPassword, newPassword, currentRefreshToken } = parseResult.data;
+  const passwordPolicy = await validatePassword(newPassword);
+  if (!passwordPolicy.valid) { sendBadRequest(res, passwordPolicy.error ?? "Password does not meet security requirements"); return; }
   const userId = req.user?.userId;
 
   if (!userId) {

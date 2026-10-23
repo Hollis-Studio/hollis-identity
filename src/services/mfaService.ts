@@ -619,7 +619,20 @@ async function verifyMfaLoginInternal(
 
   // Handle backup code verification
   if (isBackupCode && credential.backupCodesHash) {
-    const result = verifyBackupCode(credential.backupCodesHash, code);
+    const result = await prisma.$transaction(async (tx) => {
+      // Serialize readers across all tasks before inspecting the remaining codes.
+      await tx.$queryRaw`SELECT "id" FROM "MfaCredential" WHERE "id" = ${credential.id} FOR UPDATE`;
+      const current = await tx.mfaCredential.findUnique({ where: { id: credential.id } });
+      if (!current || current.userId !== userId || !current.isVerified || !current.backupCodesHash) {
+        return { valid: false, remaining: [] as string[] };
+      }
+      const checked = verifyBackupCode(current.backupCodesHash, code);
+      if (checked.valid) await tx.mfaCredential.update({
+        where: { id: current.id },
+        data: { backupCodesHash: JSON.stringify(checked.remaining), backupCodesRemaining: checked.remaining.length, lastUsedAt: new Date() },
+      });
+      return checked;
+    });
     if (!result.valid) {
       await logMfaEvent({
         userId,
@@ -639,15 +652,6 @@ async function verifyMfaLoginInternal(
       );
     }
 
-    // Update remaining codes
-    await prisma.mfaCredential.update({
-      where: { id: credential.id },
-      data: {
-        backupCodesHash: JSON.stringify(result.remaining),
-        backupCodesRemaining: result.remaining.length,
-        lastUsedAt: new Date(),
-      },
-    });
 
     await logMfaEvent({
       userId,
@@ -831,6 +835,7 @@ export async function removeCredential(
   userId: string,
   credentialId: string,
   requestMeta?: { ipAddress?: string; userAgent?: string },
+  freshMfaProof = false,
 ): Promise<void> {
   // MFA operations are cross-tenant by design (auth-related)
   return runAsSystemOperation(
@@ -845,6 +850,10 @@ export async function removeCredential(
           "CREDENTIAL_NOT_FOUND",
           404,
         );
+      }
+
+      if (credential.isVerified && !freshMfaProof) {
+        throw createMfaError("Fresh MFA verification is required", "MFA_REQUIRED", 403);
       }
 
       // Check if this is the last verified credential
@@ -872,7 +881,12 @@ export async function removeCredential(
       }
 
       await prisma.$transaction(async (tx) => {
-        await tx.mfaCredential.delete({ where: { id: credentialId } });
+        // A setup may verify between the route/service reads and this write.
+        // Bare-session cleanup may only delete a row that is STILL unverified.
+        const deleted = await tx.mfaCredential.deleteMany({
+          where: { id: credentialId, userId, ...(freshMfaProof ? {} : { isVerified: false }) },
+        });
+        if (deleted.count !== 1) throw createMfaError("Fresh MFA verification is required", "MFA_REQUIRED", 403);
 
         // If this was the default, set another one as default
         if (credential.isDefault) {

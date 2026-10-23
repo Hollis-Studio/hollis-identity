@@ -110,11 +110,9 @@ const dataMigrationModeFlagSchema = z.enum(["1"]).optional();
 // ============================================================================
 
 /**
- * Until this instant, DELETE /auth/account without a deletion grant is still
- * accepted (access token only — the pre-grant behavior). Workouts builds
- * already in the stores/review call it with no body, after deleting their
- * Workouts server data, so rejecting them would leave a user with lost data
- * and a live login. Remove this window once those builds are retired.
+ * Historical compatibility date retained for explicit test/override scenarios.
+ * Grant-less deletion is disabled by default. Current clients obtain a fresh
+ * deletion grant; any exceptional compatibility override must be bounded.
  */
 export const LEGACY_ACCOUNT_DELETE_SUNSET = new Date("2026-12-31T00:00:00Z");
 
@@ -134,13 +132,13 @@ const legacyAccountDeleteUntilSchema = z
 
 /**
  * Resolve the legacy grant-less account-deletion sunset from the raw
- * IDENTITY_LEGACY_ACCOUNT_DELETE_UNTIL value. Unset/empty → the built-in
- * LEGACY_ACCOUNT_DELETE_SUNSET; "off" → null (window closed); ISO date → that
+ * IDENTITY_LEGACY_ACCOUNT_DELETE_UNTIL value. Unset/empty and "off" close the
+ * compatibility window; only an explicit ISO date enables it until that
  * instant (a past date also closes the window). Unparseable → closed (fail safe).
  */
 export function resolveLegacyAccountDeleteSunset(raw: string | undefined): Date | null {
   const value = raw?.trim();
-  if (!value) return LEGACY_ACCOUNT_DELETE_SUNSET;
+  if (!value) return null;
   if (LEGACY_ACCOUNT_DELETE_OFF_VALUES.has(value.toLowerCase())) return null;
   const parsed = Date.parse(value);
   return Number.isNaN(parsed) ? null : new Date(parsed);

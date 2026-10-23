@@ -658,34 +658,16 @@ async function claimOAuthIdToken(
     : null;
   const store = getStore();
 
-  const isMarked = async (key: string): Promise<boolean> => {
-    try {
-      return await store.isTokenDenied(key);
-    } catch (err) {
-      logger.error({ err, provider }, "OAuth replay-cache lookup failed — rejecting (fail-closed)");
-      throw new OAuthError(OAUTH_ERROR_CODE.VERIFICATION_FAILED, "Unable to verify sign-in credential");
-    }
-  };
-
-  if (await isMarked(replayKey)) {
-    if (bindingKey && await isMarked(bindingKey)) {
-      logger.info({ provider }, "OAuth id_token re-presented by the install that first used it — accepted");
-      return;
-    }
-    throw new OAuthError(
-      OAUTH_ERROR_CODE.TOKEN_REUSED,
-      "OAuth id_token has already been used by another install or attempt",
-    );
-  }
-
-  // Expire the markers when the token would naturally expire so the table
-  // self-prunes (cap the TTL defensively in case of a bogus far-future exp).
-  // The binding is written first: if the replay marker then fails to persist,
-  // the token is still unused, so a retry is not locked out.
-  const maxTtlMs = 60 * 60 * 1000; // 1h — longer than any provider id_token lifetime
+  const maxTtlMs = 60 * 60 * 1000;
   const expiresAt = new Date(Math.min(verified.exp * 1000, Date.now() + maxTtlMs));
-  if (bindingKey) await store.denyToken(bindingKey, expiresAt, "oauth_replay");
-  await store.denyToken(replayKey, expiresAt, "oauth_replay");
+  let accepted: boolean;
+  try {
+    accepted = await store.claimOAuthToken(replayKey, bindingKey, expiresAt);
+  } catch (err) {
+    logger.error({ err, provider }, "OAuth replay-cache claim failed — rejecting (fail-closed)");
+    throw new OAuthError(OAUTH_ERROR_CODE.VERIFICATION_FAILED, "Unable to verify sign-in credential");
+  }
+  if (!accepted) throw new OAuthError(OAUTH_ERROR_CODE.TOKEN_REUSED, "OAuth id_token has already been used by another install or attempt");
 }
 
 export async function verifyOAuthCredentials(

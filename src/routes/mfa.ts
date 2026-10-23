@@ -61,6 +61,12 @@ import {
   sendSuccess,
 } from "../utils/response.js";
 
+import { authorizeMfaEnrollment, issueMfaEnrollmentAuthorization, verifyMfaEnrollmentAuthorization, mfaPrimaryProofSchema } from "../services/mfaManagementAuthorization";
+import { validateStepUpToken } from "../middleware/mfa";
+
+const securedTotpSetupSchema = totpSetupRequestSchema.extend({ reauthentication: mfaPrimaryProofSchema.optional() });
+const securedTotpVerifySchema = totpVerifyRequestSchema.extend({ enrollmentAuthorization: z.string().min(1) });
+
 export const mfaRouter = Router();
 
 // ============================================================================
@@ -195,11 +201,23 @@ mfaRouter.delete(
 
       const params = parseParams(credentialIdParamsSchema, req.params, res);
       if (!params) return;
+      const credential = await prisma.mfaCredential.findFirst({
+        where: { id: params.credentialId, userId: req.user.userId },
+        select: { isVerified: true },
+      });
+      if (!credential) return sendError(res, "Credential not found", 404, undefined, "CREDENTIAL_NOT_FOUND");
+      const stepUpToken = req.headers["x-step-up-token"];
+      const freshMfaProof = credential.isVerified && typeof stepUpToken === "string" &&
+        await validateStepUpToken(stepUpToken, req.user.userId, "MODIFY_MFA");
+      if (credential.isVerified && !freshMfaProof) {
+        return sendError(res, "Fresh MFA authentication is required", 403, undefined, "STEP_UP_REQUIRED");
+      }
 
       await mfaService.removeCredential(
         req.user.userId,
         params.credentialId,
         getRequestMeta(req),
+        freshMfaProof,
       );
 
       // 204 No Content — Identity response.ts does not export sendNoContent yet.
@@ -263,16 +281,20 @@ mfaRouter.post(
         return sendBadRequest(res, "User not authenticated");
       }
 
-      const body = parseBody(totpSetupRequestSchema, req.body, res);
+      const body = parseBody(securedTotpSetupSchema, req.body, res);
       if (!body) return;
 
-      const { deviceName } = body as TotpSetupRequestContract;
+      const { deviceName, reauthentication } = body as z.infer<typeof securedTotpSetupSchema>;
+      const stepUpToken = req.headers["x-step-up-token"];
+      if (!(await authorizeMfaEnrollment(req.user.userId, reauthentication, typeof stepUpToken === "string" ? stepUpToken : undefined, req.ip ?? "unknown"))) {
+        return sendError(res, "Fresh authentication is required", 403, undefined, "REAUTHENTICATION_REQUIRED");
+      }
       const result = await mfaService.initiateTotpSetup(
         req.user.userId,
         deviceName ?? "Authenticator App",
       );
 
-      return sendSuccess(res, result);
+      return sendSuccess(res, { ...result, enrollmentAuthorization: issueMfaEnrollmentAuthorization(req.user.userId, result.credentialId) });
     } catch (err) {
       logger.error({ err }, "[MFA] Failed to initiate TOTP setup");
       return sendError(
@@ -299,10 +321,13 @@ mfaRouter.post(
         return sendBadRequest(res, "User not authenticated");
       }
 
-      const body = parseBody(totpVerifyRequestSchema, req.body, res);
+      const body = parseBody(securedTotpVerifySchema, req.body, res);
       if (!body) return;
 
-      const { credentialId, code } = body as TotpVerifyRequestContract;
+      const { credentialId, code, enrollmentAuthorization } = body as z.infer<typeof securedTotpVerifySchema>;
+      if (!verifyMfaEnrollmentAuthorization(enrollmentAuthorization, req.user.userId, credentialId)) {
+        return sendError(res, "Enrollment authorization is invalid or expired", 403, undefined, "REAUTHENTICATION_REQUIRED");
+      }
       const result = await mfaService.verifyTotpSetup(
         req.user.userId,
         credentialId,
@@ -442,12 +467,12 @@ mfaRouter.post("/login/verify", async (req: Request, res: Response) => {
       async () =>
         prisma.user.findUnique({
           where: { id: userIdToVerify },
-          select: { id: true, email: true, role: true, emailVerified: true },
+          select: { id: true, email: true, role: true, organizationId: true, isActive: true, emailVerified: true },
         }),
       { reason: "auth:mfa-verify" },
     );
 
-    if (!user) {
+    if (!user || !user.isActive) {
       // phi-safe:userId — surrogate key, not PHI
       logger.error(
         { userId: userIdToVerify },
@@ -459,8 +484,8 @@ mfaRouter.post("/login/verify", async (req: Request, res: Response) => {
     // --- Generate full session tokens with mfaVerifiedAt ---
     const tokenResponse = await generateMfaVerifiedToken(
       userIdToVerify,
-      userRole,
-      userOrgId,
+      user.role,
+      user.organizationId,
       { email: user.email, emailVerified: user.emailVerified != null },
     );
 

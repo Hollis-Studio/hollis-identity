@@ -253,17 +253,18 @@ export async function resetPassword(
 
   // Transaction: update password, mark token used, revoke all sessions
   const { email } = await prisma.$transaction(async (tx) => {
+    // Claim before changing the password. A concurrent consumer must lose even
+    // when both requests validated the token before password hashing completed.
+    const claimed = await tx.passwordResetToken.updateMany({
+      where: { tokenHash, userId: validation.userId, usedAt: null, expiresAt: { gt: new Date() } },
+      data: { usedAt: new Date() },
+    });
+    if (claimed.count !== 1) throw new PasswordResetError("Invalid or expired reset token", "INVALID_TOKEN");
     // Update user's password
     const updated = await tx.user.update({
       where: { id: validation.userId },
       data: { passwordHash },
       select: { email: true },
-    });
-
-    // Mark token as used
-    await tx.passwordResetToken.update({
-      where: { tokenHash },
-      data: { usedAt: new Date() },
     });
 
     // Revoke all active refresh tokens (invalidate all sessions)
