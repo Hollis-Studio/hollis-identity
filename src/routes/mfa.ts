@@ -207,7 +207,9 @@ mfaRouter.delete(
       });
       if (!credential) return sendError(res, "Credential not found", 404, undefined, "CREDENTIAL_NOT_FOUND");
       const stepUpToken = req.headers["x-step-up-token"];
-      if (credential.isVerified && (typeof stepUpToken !== "string" || !(await validateStepUpToken(stepUpToken, req.user.userId, "MODIFY_MFA")))) {
+      const freshMfaProof = credential.isVerified && typeof stepUpToken === "string" &&
+        await validateStepUpToken(stepUpToken, req.user.userId, "MODIFY_MFA");
+      if (credential.isVerified && !freshMfaProof) {
         return sendError(res, "Fresh MFA authentication is required", 403, undefined, "STEP_UP_REQUIRED");
       }
 
@@ -215,6 +217,7 @@ mfaRouter.delete(
         req.user.userId,
         params.credentialId,
         getRequestMeta(req),
+        freshMfaProof,
       );
 
       // 204 No Content — Identity response.ts does not export sendNoContent yet.

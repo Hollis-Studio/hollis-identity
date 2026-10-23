@@ -1,0 +1,11 @@
+[extend]
+useDefault = true
+
+# The npm test command's committed dummy encryption key is not a credential.
+# Both the path AND exact value must match; other package.json secrets still fail.
+[allowlist]
+description = "Dedicated local npm test encryption fixture"
+condition = "AND"
+paths = ['''^package\.json$''']
+regexTarget = "secret"
+regexes = ['''^test-encryption-key-at-least-32-characters-long$''']

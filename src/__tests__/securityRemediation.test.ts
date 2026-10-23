@@ -49,3 +49,22 @@ test("MFA management refuses bearer-only enrollment for first and additional fac
   prisma.mfaCredential.count = (async () => 1) as typeof original;
   assert.equal(await authorizeMfaEnrollment("user", { method: "password", currentPassword: "fixture" }, undefined, "127.0.0.1"), false);
 });
+
+import { removeCredential } from "../services/mfaService";
+test("bare-session cleanup cannot delete a credential verified after authorization reads", async t => {
+  const credential = { id: "credential", userId: "user", isVerified: false, isDefault: false };
+  const originals = { findUnique: prisma.mfaCredential.findUnique, count: prisma.mfaCredential.count, user: prisma.user.findUnique, transaction: prisma.$transaction };
+  t.after(() => { prisma.mfaCredential.findUnique = originals.findUnique; prisma.mfaCredential.count = originals.count; prisma.user.findUnique = originals.user; prisma.$transaction = originals.transaction; });
+  prisma.mfaCredential.findUnique = (async () => credential) as typeof originals.findUnique;
+  prisma.mfaCredential.count = (async () => 1) as typeof originals.count;
+  prisma.user.findUnique = (async () => ({ role: "CLIENT" })) as typeof originals.user;
+  prisma.$transaction = (async (fn: (tx: unknown) => unknown) => {
+    // The real database would recheck the conditional write after the concurrent verification.
+    credential.isVerified = true;
+    return fn({ mfaCredential: { deleteMany: async ({ where }: { where: { isVerified?: boolean } }) => {
+      assert.equal(where.isVerified, false);
+      return { count: 0 };
+    } } });
+  }) as typeof originals.transaction;
+  await assert.rejects(removeCredential("user", "credential"), /Fresh MFA verification is required/);
+});
