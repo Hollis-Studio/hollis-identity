@@ -739,10 +739,8 @@ authRouter.post("/onboarding/reset", authenticateToken, async (req: Request, res
 // ({method:"password",currentPassword} | {method:"mfa"} within 10 min of MFA |
 // {method:"oauth",provider,idToken,nonce?}) returns a 10-minute
 // { authorization } grant; DELETE /account then requires { authorization }.
-// Legacy: a DELETE with no `authorization` field (shipped Workouts builds send
-// no body) is accepted on the access token alone until LEGACY_ACCOUNT_DELETE_SUNSET
-// The window is disabled by default. Only an explicit bounded
-// IDENTITY_LEGACY_ACCOUNT_DELETE_UNTIL override permits grant-less requests.
+// Legacy requests without `authorization` are refused by default. Only an
+// explicit bounded IDENTITY_LEGACY_ACCOUNT_DELETE_UNTIL override permits them.
 // auth-protected: requires valid access token
 // ============================================================================
 
