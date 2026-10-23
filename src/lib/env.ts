@@ -110,11 +110,9 @@ const dataMigrationModeFlagSchema = z.enum(["1"]).optional();
 // ============================================================================
 
 /**
- * Until this instant, DELETE /auth/account without a deletion grant is still
- * accepted (access token only — the pre-grant behavior). Workouts builds
- * already in the stores/review call it with no body, after deleting their
- * Workouts server data, so rejecting them would leave a user with lost data
- * and a live login. Remove this window once those builds are retired.
+ * Historical compatibility date retained for explicit test/override scenarios.
+ * Grant-less deletion is disabled by default. Current clients obtain a fresh
+ * deletion grant; any exceptional compatibility override must be bounded.
  */
 export const LEGACY_ACCOUNT_DELETE_SUNSET = new Date("2026-12-31T00:00:00Z");
 

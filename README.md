@@ -116,7 +116,7 @@ All routes are prefixed `/v1/auth` unless noted.
 | `POST` | `/verify-email/send` | bearer | Sends or resends email verification link. |
 | `GET`  | `/verify-email/confirm` | public | Consumes single-use token from email link (`?token=…`); marks `emailVerified`. |
 | `POST` | `/account/deletion-authorization` | bearer | Fresh re-auth for account deletion. Body: `{ method: "password", currentPassword }`, `{ method: "mfa" }` (MFA verified ≤10 min ago) or `{ method: "oauth", provider, idToken, nonce? }` (nonce required for Apple). Returns a 10-minute `{ authorization }` grant; failure → 401 `REAUTHENTICATION_REQUIRED`. |
-| `DELETE` | `/account` | bearer | Erases the Identity user and all auth-layer data (idempotent). Body: `{ authorization }` from the route above; a present-but-invalid grant → 401 `REAUTHENTICATION_REQUIRED`. **Legacy window:** a request with no `authorization` field (shipped Workouts builds send no body) is still accepted on the access token alone until 2026-12-31T00:00Z (`IDENTITY_LEGACY_ACCOUNT_DELETE_UNTIL`); each use logs a warning and the `auth_account_delete_legacy_grantless` metric. After the sunset it returns 401 `REAUTHENTICATION_REQUIRED`. |
+| `DELETE` | `/account` | bearer | Erases the Identity user and all auth-layer data (idempotent). Body: `{ authorization }` from the route above; a present-but-invalid grant → 401 `REAUTHENTICATION_REQUIRED`. Grant-less requests return 401 `REAUTHENTICATION_REQUIRED` by default. An explicit, bounded `IDENTITY_LEGACY_ACCOUNT_DELETE_UNTIL` override can temporarily permit older clients; each use logs a warning and the `auth_account_delete_legacy_grantless` metric. |
 
 ### MFA routes (`/v1/auth/mfa`)
 
@@ -238,7 +238,7 @@ set +a
 
 | Variable | Required | Description |
 | -------- | -------- | ----------- |
-| `IDENTITY_LEGACY_ACCOUNT_DELETE_UNTIL` | no | ISO-8601 instant until which grant-less `DELETE /account` is accepted (default `2026-12-31T00:00:00Z`). `off` or a past date closes the window immediately. |
+| `IDENTITY_LEGACY_ACCOUNT_DELETE_UNTIL` | no | ISO-8601 instant until which grant-less `DELETE /account` is accepted (default disabled). Unset, `off` or a past date closes the window; only an explicit future date enables compatibility. |
 
 **Observability / Sentry:**
 

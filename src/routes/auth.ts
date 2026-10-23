@@ -741,8 +741,8 @@ authRouter.post("/onboarding/reset", authenticateToken, async (req: Request, res
 // { authorization } grant; DELETE /account then requires { authorization }.
 // Legacy: a DELETE with no `authorization` field (shipped Workouts builds send
 // no body) is accepted on the access token alone until LEGACY_ACCOUNT_DELETE_SUNSET
-// (2026-12-31Z, env IDENTITY_LEGACY_ACCOUNT_DELETE_UNTIL overrides / "off"
-// disables). A present-but-invalid grant is always rejected.
+// The window is disabled by default. Only an explicit bounded
+// IDENTITY_LEGACY_ACCOUNT_DELETE_UNTIL override permits grant-less requests.
 // auth-protected: requires valid access token
 // ============================================================================
 
