@@ -619,7 +619,20 @@ async function verifyMfaLoginInternal(
 
   // Handle backup code verification
   if (isBackupCode && credential.backupCodesHash) {
-    const result = verifyBackupCode(credential.backupCodesHash, code);
+    const result = await prisma.$transaction(async (tx) => {
+      // Serialize readers across all tasks before inspecting the remaining codes.
+      await tx.$queryRaw`SELECT "id" FROM "MfaCredential" WHERE "id" = ${credential.id} FOR UPDATE`;
+      const current = await tx.mfaCredential.findUnique({ where: { id: credential.id } });
+      if (!current || current.userId !== userId || !current.isVerified || !current.backupCodesHash) {
+        return { valid: false, remaining: [] as string[] };
+      }
+      const checked = verifyBackupCode(current.backupCodesHash, code);
+      if (checked.valid) await tx.mfaCredential.update({
+        where: { id: current.id },
+        data: { backupCodesHash: JSON.stringify(checked.remaining), backupCodesRemaining: checked.remaining.length, lastUsedAt: new Date() },
+      });
+      return checked;
+    });
     if (!result.valid) {
       await logMfaEvent({
         userId,
@@ -639,15 +652,6 @@ async function verifyMfaLoginInternal(
       );
     }
 
-    // Update remaining codes
-    await prisma.mfaCredential.update({
-      where: { id: credential.id },
-      data: {
-        backupCodesHash: JSON.stringify(result.remaining),
-        backupCodesRemaining: result.remaining.length,
-        lastUsedAt: new Date(),
-      },
-    });
 
     await logMfaEvent({
       userId,

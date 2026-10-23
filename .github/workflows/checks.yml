@@ -63,7 +63,7 @@ jobs:
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: "22.23.4"
           cache: npm
 
       - name: Install dependencies
@@ -92,21 +92,23 @@ jobs:
       - name: Test
         run: npm test
 
-      # Report-only, deliberately NOT gating (yet).
-      #
-      # Reason: this repo has never had CI, so the current advisory count is
-      # unknown and unreviewed. Gating on day one would either block every PR or
-      # be silenced with a blanket `--audit-level=critical`, and a lockfile fix
-      # cannot be taken here without a dependency bump nobody has reviewed.
-      # The step exists so the number is visible in every run and in the job
-      # summary; flip `continue-on-error` to false once the backlog is at zero
-      # and Dependabot (see .github/dependabot.yml) is keeping it there.
-      - name: Dependency audit (report only)
-        continue-on-error: true
+      - name: Real PostgreSQL security concurrency regressions
+        run: npm run test:security:database
+        env:
+          NODE_ENV: test
+          IDENTITY_SECURITY_DATABASE_TESTS: "1"
+          JWT_SECRET: test-secret-at-least-32-characters-long # gitleaks:allow -- isolated CI test fixture only
+          ENCRYPTION_KEY: test-encryption-key-at-least-32-characters-long # gitleaks:allow -- isolated CI test fixture only
+          BCRYPT_COST_FACTOR: "10"
+
+      # Every production advisory blocks deployment. Development dependencies
+      # are audited separately in the lockfile and updated with the same patch.
+      - name: Dependency security gate
         run: |
-          npm audit --omit=dev --audit-level=high | tee /tmp/audit.txt
+          set -o pipefail
+          npm audit --omit=dev --audit-level=moderate | tee /tmp/audit.txt
           {
-            echo "## npm audit (production dependencies, high+)"
+            echo "## npm audit (production dependencies, moderate+)"
             echo ""
             echo '```'
             cat /tmp/audit.txt

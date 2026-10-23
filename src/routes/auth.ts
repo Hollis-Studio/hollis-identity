@@ -17,7 +17,7 @@ import {
   IdentityForgotPasswordRequestSchema,
   type IdentityResetPasswordResponse,
 } from "@hollis-studio/contracts/domain/identity-auth";
-import { passwordSchema } from "@hollis-studio/contracts/password";
+import { passwordSchema, validatePassword } from "@hollis-studio/contracts/password";
 import { Router, type Request, type Response } from "express";
 import crypto from "crypto";
 import { z } from "zod";
@@ -314,6 +314,8 @@ authRouter.post("/register", async (req: Request, res: Response) => {
       return;
     }
 
+    const passwordPolicy = await validatePassword(password, { userInputs: [email] });
+    if (!passwordPolicy.valid) { sendBadRequest(res, passwordPolicy.error ?? "Password does not meet security requirements"); return; }
     const passwordHash = await hashPassword(password);
     // crypto.randomUUID() is Node 14.17+ built-in — no extra dependency needed
     const id = crypto.randomUUID();
@@ -994,6 +996,8 @@ authRouter.post("/reset-password", async (req: Request, res: Response) => {
   }
 
   const { token, newPassword } = parseResult.data;
+  const passwordPolicy = await validatePassword(newPassword);
+  if (!passwordPolicy.valid) { sendBadRequest(res, passwordPolicy.error ?? "Password does not meet security requirements"); return; }
 
   // SECURITY: System operation — token lookup is cross-tenant; userId unknown until token resolves.
   await runAsSystemOperation(
@@ -1047,6 +1051,8 @@ authRouter.post("/change-password", authenticateToken, async (req: Request, res:
   }
 
   const { currentPassword, newPassword, currentRefreshToken } = parseResult.data;
+  const passwordPolicy = await validatePassword(newPassword);
+  if (!passwordPolicy.valid) { sendBadRequest(res, passwordPolicy.error ?? "Password does not meet security requirements"); return; }
   const userId = req.user?.userId;
 
   if (!userId) {

@@ -105,21 +105,16 @@ it("rejects a re-presentation that verifies to a different subject", async () =>
   await assert.rejects(signIn("token-subject", INSTALL_A), rejectsWith(OAUTH_ERROR_CODE.TOKEN_REUSED));
 });
 
-it("fails closed when the replay store lookup fails", async () => {
+it("fails closed when the first replay claim fails", async () => {
   mockGoogle();
-  mock.method(getStore(), "isTokenDenied", async () => { throw new Error("Synthetic store outage"); });
+  mock.method(getStore(), "claimOAuthToken", async () => { throw new Error("Synthetic store outage"); });
   await assert.rejects(signIn("token-store-down", INSTALL_A), rejectsWith(OAUTH_ERROR_CODE.VERIFICATION_FAILED));
 });
 
-it("fails closed when only the install binding lookup fails", async () => {
+it("fails closed when an existing install replay claim fails", async () => {
   mockGoogle();
   await signIn("token-binding-down", INSTALL_A);
-  const store = getStore();
-  const realLookup = store.isTokenDenied.bind(store);
-  mock.method(store, "isTokenDenied", async (key: string) => {
-    if (key.startsWith("oauth_install:")) throw new Error("Synthetic store outage");
-    return realLookup(key);
-  });
+  mock.method(getStore(), "claimOAuthToken", async () => { throw new Error("Synthetic transaction outage"); });
   await assert.rejects(signIn("token-binding-down", INSTALL_A), rejectsWith(OAUTH_ERROR_CODE.VERIFICATION_FAILED));
 });
 

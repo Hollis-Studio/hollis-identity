@@ -134,13 +134,13 @@ const legacyAccountDeleteUntilSchema = z
 
 /**
  * Resolve the legacy grant-less account-deletion sunset from the raw
- * IDENTITY_LEGACY_ACCOUNT_DELETE_UNTIL value. Unset/empty → the built-in
- * LEGACY_ACCOUNT_DELETE_SUNSET; "off" → null (window closed); ISO date → that
+ * IDENTITY_LEGACY_ACCOUNT_DELETE_UNTIL value. Unset/empty and "off" close the
+ * compatibility window; only an explicit ISO date enables it until that
  * instant (a past date also closes the window). Unparseable → closed (fail safe).
  */
 export function resolveLegacyAccountDeleteSunset(raw: string | undefined): Date | null {
   const value = raw?.trim();
-  if (!value) return LEGACY_ACCOUNT_DELETE_SUNSET;
+  if (!value) return null;
   if (LEGACY_ACCOUNT_DELETE_OFF_VALUES.has(value.toLowerCase())) return null;
   const parsed = Date.parse(value);
   return Number.isNaN(parsed) ? null : new Date(parsed);

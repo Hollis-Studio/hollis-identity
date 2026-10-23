@@ -153,8 +153,8 @@ it("accepts a valid grant before and after the sunset", () => {
 });
 
 it("resolves the legacy sunset override from IDENTITY_LEGACY_ACCOUNT_DELETE_UNTIL", () => {
-  assert.equal(resolveLegacyAccountDeleteSunset(undefined), LEGACY_ACCOUNT_DELETE_SUNSET);
-  assert.equal(resolveLegacyAccountDeleteSunset("  "), LEGACY_ACCOUNT_DELETE_SUNSET);
+  assert.equal(resolveLegacyAccountDeleteSunset(undefined), null);
+  assert.equal(resolveLegacyAccountDeleteSunset("  "), null);
   assert.equal(resolveLegacyAccountDeleteSunset("off"), null);
   assert.equal(resolveLegacyAccountDeleteSunset("OFF"), null);
   assert.equal(resolveLegacyAccountDeleteSunset("garbage"), null);

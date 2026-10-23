@@ -132,6 +132,8 @@ export interface TokenDenylistStore {
    * Check if a specific token JTI is denied.
    */
   isTokenDenied(jti: string): Promise<boolean>;
+  /** Atomically authorize the first install, and only its subsequent re-presentations. */
+  claimOAuthToken(replayKey: string, bindingKey: string | null, expiresAt: Date): Promise<boolean>;
 
   /**
    * Check if all tokens for a user are denied (user-level revocation).
@@ -226,6 +228,18 @@ export class InMemoryTokenDenylistStore implements TokenDenylistStore {
   }
 
    
+  async claimOAuthToken(replayKey: string, bindingKey: string | null, expiresAt: Date): Promise<boolean> {
+    const existing = this.deniedTokens.get(replayKey);
+    if (existing && existing.expiresAt >= Date.now()) {
+      return Boolean(bindingKey && (this.deniedTokens.get(bindingKey)?.expiresAt ?? 0) >= Date.now());
+    }
+    const entry = { expiresAt: expiresAt.getTime(), reason: "oauth_replay" as const, revokedAt: Date.now() };
+    // No await between reads and writes: one process-wide atomic claim in tests/dev.
+    this.deniedTokens.set(replayKey, entry);
+    if (bindingKey) this.deniedTokens.set(bindingKey, entry);
+    return true;
+  }
+
   async getUserDeniedAfter(userId: string): Promise<number | null> {
     const entry = this.userDeniedAfter.get(userId);
     if (!entry) return null;
@@ -263,10 +277,11 @@ export class InMemoryTokenDenylistStore implements TokenDenylistStore {
     issuedBefore: Date,
     reason: RevocationReason,
   ): Promise<void> {
+    const prior = this.userDeniedAfter.get(userId);
     this.userDeniedAfter.set(userId, {
-      timestamp: issuedBefore.getTime(),
+      timestamp: Math.max(prior?.timestamp ?? 0, issuedBefore.getTime()),
       // Entry expires when all affected tokens would have expired
-      expiresAt: userDenylistEntryExpiresAt(issuedBefore).getTime(),
+      expiresAt: Math.max(prior?.expiresAt ?? 0, userDenylistEntryExpiresAt(issuedBefore).getTime()),
       reason,
     });
 
@@ -367,6 +382,22 @@ export class DatabaseTokenDenylistStore implements TokenDenylistStore {
     return true;
   }
 
+  async claimOAuthToken(replayKey: string, bindingKey: string | null, expiresAt: Date): Promise<boolean> {
+    return prisma.$transaction(async (tx) => {
+      // Advisory lock covers an absent row too; both markers commit together.
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${replayKey}, 0))`;
+      const existing = await tx.accessTokenDenylistEntry.findUnique({ where: { jti: replayKey } });
+      if (existing && existing.expiresAt >= new Date()) {
+        if (!bindingKey) return false;
+        const binding = await tx.accessTokenDenylistEntry.findUnique({ where: { jti: bindingKey } });
+        return Boolean(binding && binding.expiresAt >= new Date());
+      }
+      await tx.accessTokenDenylistEntry.upsert({ where: { jti: replayKey }, create: { jti: replayKey, expiresAt, reason: "oauth_replay" }, update: { expiresAt, reason: "oauth_replay" } });
+      if (bindingKey) await tx.accessTokenDenylistEntry.upsert({ where: { jti: bindingKey }, create: { jti: bindingKey, expiresAt, reason: "oauth_replay" }, update: { expiresAt, reason: "oauth_replay" } });
+      return true;
+    });
+  }
+
   async getUserDeniedAfter(userId: string): Promise<number | null> {
     const entry = await prisma.userTokenDenylistEntry.findUnique({
       where: { userId },
@@ -400,21 +431,14 @@ export class DatabaseTokenDenylistStore implements TokenDenylistStore {
     // Entry lives until every access token issued at or before the watermark has
     // expired on its own — see userDenylistEntryExpiresAt.
     const expiresAt = userDenylistEntryExpiresAt(issuedBefore);
-    await prisma.userTokenDenylistEntry.upsert({
-      where: { userId },
-      update: {
-        deniedBefore: issuedBefore,
-        reason,
-        expiresAt,
-        revokedAt: new Date(),
-      },
-      create: {
-        userId,
-        deniedBefore: issuedBefore,
-        reason,
-        expiresAt,
-      },
-    });
+    await prisma.$executeRaw`
+      INSERT INTO "UserTokenDenylistEntry" ("id", "userId", "deniedBefore", "expiresAt", "reason", "revokedAt")
+      VALUES (gen_random_uuid()::text, ${userId}, ${issuedBefore}, ${expiresAt}, ${reason}, CURRENT_TIMESTAMP)
+      ON CONFLICT ("userId") DO UPDATE SET
+        "deniedBefore" = GREATEST("UserTokenDenylistEntry"."deniedBefore", EXCLUDED."deniedBefore"),
+        "expiresAt" = GREATEST("UserTokenDenylistEntry"."expiresAt", EXCLUDED."expiresAt"),
+        "reason" = EXCLUDED."reason", "revokedAt" = CURRENT_TIMESTAMP
+    `;
   }
 
   async cleanup(): Promise<number> {

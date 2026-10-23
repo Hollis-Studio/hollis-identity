@@ -300,3 +300,29 @@ npm run typecheck
 npm run build
 npm test
 ```
+
+### Security requirements for MFA management
+
+`POST /v1/auth/mfa/totp/setup` requires fresh primary proof in
+`reauthentication: { method: "password", currentPassword }` for the first factor.
+OAuth-only accounts may instead send `{ method: "oauth", provider, idToken,
+nonce?, clientInstallId? }`; Apple requires a fresh nonce and OAuth proof must be
+recent. Once a factor is enrolled, setup requires an action-specific
+`X-Step-Up-Token` for `MODIFY_MFA`, obtained with the existing factor.
+
+Setup returns an additive `enrollmentAuthorization` field. Keep it with the
+setup credential and send it to `/totp/verify` with `credentialId` and `code`.
+It expires after ten minutes and is bound to that account and credential.
+Removing a credential also requires a `MODIFY_MFA` step-up token. Bare access
+tokens cannot enroll a replacement factor or remove an existing one.
+
+Account deletion requires the short-lived deletion grant. The legacy grantless
+compatibility window is closed by default; any exceptional override must be
+explicit and bounded. Production database connections require `DATABASE_SSL_CA`
+and always verify the server certificate.
+
+Run `npm run test:security:database` with `NODE_ENV=test`,
+`IDENTITY_SECURITY_DATABASE_TESTS=1`, the usual test JWT/encryption settings,
+and `DATABASE_URL` pointing to an isolated local `test` or `identity_security`
+database after `npm run prisma:migrate:deploy`. The race tests only create and
+remove their own fixture rows and reject nonlocal database URLs.
